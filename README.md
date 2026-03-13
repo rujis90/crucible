@@ -1,6 +1,6 @@
 # crucible
 
-![progress](progress.png)
+![keeps](keeps.png)
 
 *In metallurgy, a crucible is the vessel where raw metals are subjected to extreme heat until only the purest alloy remains. In quantitative finance, the same principle applies — you throw a hundred strategy ideas into the fire and keep only what survives. This repo automates that process. An AI agent proposes changes to a portfolio rotation strategy, backtests them against 18 years of walk-forward history including the 2008 crash, COVID, and the 2022 rate shock, keeps what improves out-of-sample Sharpe, discards the rest, and repeats. You wake up to a log of experiments and a better strategy. —@henri, March 2026*
 
