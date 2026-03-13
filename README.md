@@ -18,7 +18,7 @@ The agent uses `git` to version control improvements. `results.tsv` is an append
 
 ## Quick start
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (or any coding agent).
+**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ```bash
 # 1. Install uv (if you don't have it)
@@ -47,7 +47,7 @@ The strategy logic in `strategy.py` and the agent instructions in `program.md` a
 
 ## Running the agent
 
-Point Claude Code (or any coding agent) at this repo and prompt:
+Point Claude Code at this repo and prompt:
 
 ```
 Have a look at program.md and let's kick off a new experiment!
@@ -82,6 +82,10 @@ pyproject.toml    — dependencies
 - **Git as checkpoint.** Improvements are committed; failures are reverted. `results.tsv` provides a complete audit trail.
 - **Stateless batches.** Each batch starts fresh — the agent reads the current state from files, not memory. This prevents context window bloat and keeps experiments reproducible.
 - **Asset-class agnostic.** Swap the ticker list and you're running the same research loop on stocks, crypto, or anything else.
+
+## Acknowledgements
+
+Inspired by Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — the same idea applied to LLM training on a single GPU. Crucible applies it to portfolio strategy research.
 
 ## License
 
