@@ -1,0 +1,5 @@
+data.parquet
+run.log
+__pycache__/
+*.pyc
+.env

@@ -1,0 +1,14 @@
+[project]
+name = "crucible"
+version = "0.1.0"
+description = "Autonomous portfolio strategy research via AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=14.0",
+    "yfinance>=0.2",
+]
