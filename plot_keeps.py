@@ -44,10 +44,13 @@ def parse_results():
     exp_num = 0
     for line in (ROOT / "results.tsv").read_text().strip().split("\n"):
         parts = line.split("\t")
-        if len(parts) < 7:
+        if len(parts) < 7 or parts[0] == "commit":
+            continue
+        try:
+            sharpe = float(parts[1])
+        except ValueError:
             continue
         exp_num += 1
-        sharpe = float(parts[1])
         status = parts[5]
         desc = truncate(parts[6])
         if status in ("keep", "baseline"):
@@ -145,6 +148,9 @@ def plot(keeps, discards, total_experiments):
 if __name__ == "__main__":
     keeps, discards, total = parse_results()
     print(f"Found {len(keeps)} keeps, {len(discards)} discards out of {total} experiments")
+    if not keeps:
+        print("No keeps yet — nothing to plot.")
+        raise SystemExit(0)
     for exp, sharpe, lbl in keeps:
         print(f"  #{exp:3d}  {sharpe:.4f}  {lbl}")
     plot(keeps, discards, total)
