@@ -28,16 +28,19 @@ REBALANCE_EVERY = 21    # monthly rebalance (~21 trading days)
 LOOKBACK        = 252   # 12-month momentum window
 SKIP            = 21    # skip most recent 1 month (short-term reversal)
 TOP_N           = 5     # number of assets to hold
+MA_WINDOW       = 200   # trend filter: asset must be above 200-day MA
 
 
 def get_weights(data: dict) -> pd.Series:
     """
-    Top-N rotation by 12-1 momentum with absolute momentum filter.
-    Equal-weight the winners. This is the classic Faber/Antonacci baseline.
+    Top-N rotation by 12-1 momentum with:
+    - Absolute momentum filter (12m return > 0)
+    - 200-day MA trend filter (price above long-term MA)
+    Assets in a structural downtrend are excluded even with positive 12m momentum.
     """
     close = data["close"]
 
-    if len(close) < LOOKBACK + SKIP:
+    if len(close) < max(LOOKBACK + SKIP, MA_WINDOW):
         return pd.Series(0.0, index=close.columns)
 
     price_now  = close.iloc[-SKIP]
@@ -46,6 +49,14 @@ def get_weights(data: dict) -> pd.Series:
 
     # Absolute momentum filter: only hold assets with positive 12m return
     momentum = momentum[momentum > 0]
+
+    if momentum.empty:
+        return pd.Series(0.0, index=close.columns)
+
+    # Trend filter: asset must be above its 200-day MA
+    ma200 = close.iloc[-MA_WINDOW:].mean()
+    above_ma = ma200.index[price_now.reindex(ma200.index) > ma200]
+    momentum = momentum[momentum.index.isin(above_ma)]
 
     if momentum.empty:
         return pd.Series(0.0, index=close.columns)
