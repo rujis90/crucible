@@ -18,19 +18,16 @@ The agent uses `git` to version control improvements. `results.tsv` is an append
 
 ## Quick start
 
-**Requirements:** Python 3.10+, [uv](https://docs.astral.sh/uv/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+**Requirements:** Python 3.10+, [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ```bash
-# 1. Install uv (if you don't have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# 1. Install dependencies
+pip install -e .
 
-# 2. Install dependencies
-uv sync
+# 2. Run a single backtest to verify setup (~30s)
+python backtest.py
 
-# 3. Run a single backtest to verify setup (~30s)
-uv run backtest.py
-
-# 4. Start autonomous research (20 batches × 3 experiments = 60 experiments)
+# 3. Start autonomous research (20 batches × 3 experiments = 60 experiments)
 bash run_research.sh 20
 ```
 
@@ -41,7 +38,7 @@ Crucible ships with ~40 liquid ETFs spanning equities, bonds, commodities, and r
 1. Edit the `UNIVERSE` list in `backtest.py`
 2. Adjust `START_DATE` and cost parameters if needed
 3. Delete `data.parquet` (forces re-download)
-4. Run `uv run backtest.py` to verify
+4. Run `python backtest.py` to verify
 
 The strategy logic in `strategy.py` and the agent instructions in `program.md` are asset-class agnostic — they work on any universe of tickers.
 
