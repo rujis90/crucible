@@ -21,48 +21,17 @@ Weights returned:
   backtest.py clips each position to MAX_POSITION and gross to GROSS_LIMIT
 """
 
-import numpy as np
 import pandas as pd
 
 REBALANCE_EVERY = 21    # monthly rebalance (~21 trading days)
-LOOKBACK        = 252   # 12-month momentum window
-SKIP            = 21    # skip most recent 1 month (short-term reversal)
-TOP_N           = 5     # number of assets to hold
-MA_WINDOW       = 200   # trend filter: asset must be above 200-day MA
 
 
 def get_weights(data: dict) -> pd.Series:
     """
-    Top-N rotation by 12-1 momentum with:
-    - Absolute momentum filter (12m return > 0)
-    - 200-day MA trend filter (price above long-term MA)
-    Assets in a structural downtrend are excluded even with positive 12m momentum.
+    Baseline: equal-weight all assets (1/N portfolio).
+    No signal, no filter — just split the portfolio evenly.
+    Use this as a weak baseline to beat with a better strategy.
     """
     close = data["close"]
-
-    if len(close) < max(LOOKBACK + SKIP, MA_WINDOW):
-        return pd.Series(0.0, index=close.columns)
-
-    price_now  = close.iloc[-SKIP]
-    price_then = close.iloc[-LOOKBACK]
-    momentum   = (price_now / price_then - 1).dropna()
-
-    # Absolute momentum filter: only hold assets with positive 12m return
-    momentum = momentum[momentum > 0]
-
-    if momentum.empty:
-        return pd.Series(0.0, index=close.columns)
-
-    # Trend filter: asset must be above its 200-day MA
-    ma200 = close.iloc[-MA_WINDOW:].mean()
-    above_ma = ma200.index[price_now.reindex(ma200.index) > ma200]
-    momentum = momentum[momentum.index.isin(above_ma)]
-
-    if momentum.empty:
-        return pd.Series(0.0, index=close.columns)
-
-    top = momentum.nlargest(TOP_N).index.tolist()
-
-    weights = pd.Series(0.0, index=close.columns)
-    weights[top] = 1.0 / len(top)
-    return weights
+    tickers = close.columns
+    return pd.Series(1.0 / len(tickers), index=tickers)
