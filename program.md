@@ -44,18 +44,6 @@ Format: `<id> <oos_sharpe> <folds_passed> <max_drawdown> <elapsed_s> <status> <d
 
 Study it carefully. It tells you what has worked, what hasn't, and what territory is exhausted.
 
-## Search Space
-
-Things that typically work in momentum/rotation strategies:
-
-**Momentum signals:** 12-1 momentum, 3/6-month confirmation, risk-adjusted momentum, multi-timeframe
-
-**Filters:** Absolute momentum (>0), trend (above 200d MA), volatility cap
-
-**Portfolio construction:** TOP_N, inverse-volatility weighting, equal weight
-
-**Risk management:** Market regime filter, defensive rotation, volatility scaling
-
 ## Guiding Principles
 
 1. **Economic rationale first** — form a hypothesis about *why* a change should improve out-of-sample performance before coding it. Correlation mining without a reason tends to overfit.
