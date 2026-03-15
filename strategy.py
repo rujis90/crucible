@@ -8,116 +8,180 @@ Interface contract (do not rename these):
   - get_weights(data) -> pd.Series — return target portfolio weights
 
 ─────────────────────────────────────────────────────────────────────────────
-R15: Parameter tuning
-- Tighten vol shock to 1.75x (more sensitive)
-- Lower volume distribution threshold to 0.85 (less aggressive scaling)
-- Extend bond momentum window to 84 days (4-month for more stability)
+Regime-aware strategy with continuous HMM feature scaling.
+
+The HMM pre-computes three continuous features (regime_scores.csv):
+  crisis_prob : P(state is negative-return) in [0,1]
+  bull_prob   : P(state is positive-return, low vol) in [0,1]
+  entropy     : normalized uncertainty in [0,1]
+    (0 = model is certain, 1 = completely uncertain / transitioning)
+
+These scale equity exposure continuously — no hard state switching:
+  equity_wt *= max(REGIME_FLOOR,
+                   1 - CRISIS_SCALE  × crisis_prob
+                     - ENTROPY_SCALE × max(0, entropy - ENTROPY_THRESHOLD))
+
+Parameters:
+  CRISIS_SCALE       — how aggressively to reduce exposure in crisis
+  ENTROPY_SCALE      — how aggressively to reduce exposure in uncertainty
+  ENTROPY_THRESHOLD  — entropy level below which we ignore it (normal noise)
+  REGIME_FLOOR       — minimum equity weight when regime is very bad
+
+All other params from Bayesian global optimization (best_params.json).
 ─────────────────────────────────────────────────────────────────────────────
 """
 
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 
 REBALANCE_EVERY = 21
-MA_SLOW = 210
-VOL_SHORT = 7
-VOL_LONG = 110
-VOL_SHOCK_MULT = 2.0925466412638882# tightened from 2.0
-MOM_WINDOW = 126# 6-month
-BOND_MOM_WINDOW = 147# 4-month (tuned from 63)
+BOND_UNIVERSE   = ["TLT", "IEF", "SHY"]
 BOND_VOL_WINDOW = 21
-BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
-VOL_ACC_SHORT = 6
-VOL_ACC_LONG = 117
-VOL_ACC_THRESHOLD = 0.8757252204712205# tuned from 0.80
+
+# ── Global params (Bayesian-optimized) ────────────────────────────────────────
+MA_SLOW         = 200
+VOL_SHORT       = 6
+VOL_LONG        = 40
+VOL_SHOCK_MULT  = 1.8381052479447957
+MOM_WINDOW      = 147
+BOND_MOM_WINDOW = 105
+VOL_ACC_SHORT   = 28
+VOL_ACC_LONG    = 92
+VOL_ACC_THRESHOLD = 0.8757
+
+# ── Regime scaling params (to be optimized) ───────────────────────────────────
+CRISIS_SCALE       = 0.07567436002888175
+ENTROPY_SCALE      = 0.32833193857162807
+ENTROPY_THRESHOLD  = 0.6232625913144604
+REGIME_FLOOR       = 0.23478476389046207
+
+# ── Pre-computed regime scores ─────────────────────────────────────────────────
+_SCORES_FILE = Path(__file__).parent / "regime_scores.csv"
+_REGIME_SCORES = None
+
+def _load_scores():
+    global _REGIME_SCORES
+    if _REGIME_SCORES is None and _SCORES_FILE.exists():
+        _REGIME_SCORES = pd.read_csv(_SCORES_FILE, index_col=0, parse_dates=True)
+    return _REGIME_SCORES
+
+
+def _get_regime_scale(current_date: pd.Timestamp) -> float:
+    """
+    Look up pre-computed regime scores for current date.
+    Returns a scaling factor in [REGIME_FLOOR, 1.0].
+    Falls back to 1.0 (no adjustment) if scores unavailable.
+    """
+    scores = _load_scores()
+    if scores is None:
+        return 1.0
+
+    # Find closest available date (reindex to nearest past date)
+    available = scores.index[scores.index <= current_date]
+    if len(available) == 0:
+        return 1.0
+
+    row = scores.loc[available[-1]]
+    crisis_prob = float(row["crisis_prob"])
+    entropy     = float(row["entropy"])
+
+    reduction = (
+        CRISIS_SCALE * crisis_prob
+        + ENTROPY_SCALE * max(0.0, entropy - ENTROPY_THRESHOLD)
+    )
+    return float(np.clip(1.0 - reduction, REGIME_FLOOR, 1.0))
 
 
 def get_weights(data: dict) -> pd.Series:
-    close = data["close"]
+    close  = data["close"]
     volume = data["volume"]
     weights = pd.Series(0.0, index=close.columns)
-    if "QQQ" not in close.columns:
-        return weights
-    if len(close) < MA_SLOW:
-        weights["QQQ"] = 1.0
+
+    if "QQQ" not in close.columns or len(close) < MA_SLOW:
+        if "QQQ" in close.columns:
+            weights["QQQ"] = 1.0
         return weights
 
-    qqq = close["QQQ"]
-    ma200_qqq = qqq.iloc[-MA_SLOW:].mean()
-    above_ma_qqq = qqq.iloc[-1] >= ma200_qqq
+    qqq     = close["QQQ"]
+    returns = qqq.pct_change().dropna()
+    current_date = close.index[-1]
 
-    # Absolute momentum filter
+    # ── Standard regime gates ─────────────────────────────────────────────────
+    above_ma   = float(qqq.iloc[-1]) >= float(qqq.iloc[-MA_SLOW:].mean())
+
     abs_mom_ok = True
     if len(qqq) >= MOM_WINDOW:
-        raw_mom = qqq.iloc[-1] / qqq.iloc[-MOM_WINDOW] - 1
-        abs_mom_ok = raw_mom > 0
+        abs_mom_ok = float(qqq.iloc[-1]) > float(qqq.iloc[-MOM_WINDOW])
 
-    # Credit spread filter: HYG above MA200
     credit_ok = True
-    if "HYG" in close.columns and len(close["HYG"].dropna()) >= MA_SLOW:
+    if "HYG" in close.columns:
         hyg = close["HYG"].dropna()
-        ma200_hyg = hyg.iloc[-MA_SLOW:].mean()
-        credit_ok = hyg.iloc[-1] >= ma200_hyg
+        if len(hyg) >= MA_SLOW:
+            credit_ok = float(hyg.iloc[-1]) >= float(hyg.iloc[-MA_SLOW:].mean())
 
-    # Vol shock detection
-    returns = qqq.pct_change().dropna()
-    vol_short = returns.iloc[-VOL_SHORT:].std() * np.sqrt(252)
-    vol_long = returns.iloc[-VOL_LONG:].std() * np.sqrt(252)
-    vol_shock = vol_short > VOL_SHOCK_MULT * vol_long
+    vol_shock = False
+    if len(returns) >= VOL_LONG:
+        vs = returns.iloc[-VOL_SHORT:].std()
+        vl = returns.iloc[-VOL_LONG:].std() + 1e-9
+        vol_shock = (vs / vl) > VOL_SHOCK_MULT
 
-    if above_ma_qqq and abs_mom_ok and credit_ok and not vol_shock:
-        # Volume accumulation check
-        equity_wt = 1.0
-        if "QQQ" in volume.columns and len(volume["QQQ"].dropna()) >= VOL_ACC_LONG:
-            qqq_vol = volume["QQQ"].dropna()
-            avg_vol_short = qqq_vol.iloc[-VOL_ACC_SHORT:].mean()
-            avg_vol_long = qqq_vol.iloc[-VOL_ACC_LONG:].mean()
-            if avg_vol_long > 0 and avg_vol_short < VOL_ACC_THRESHOLD * avg_vol_long:
+    # ── Volume accumulation ───────────────────────────────────────────────────
+    equity_wt = 1.0
+    if "QQQ" in volume.columns:
+        qv = volume["QQQ"].dropna()
+        if len(qv) >= VOL_ACC_LONG:
+            r_short = float(qv.iloc[-VOL_ACC_SHORT:].mean())
+            r_long  = float(qv.iloc[-VOL_ACC_LONG:].mean()) + 1e-9
+            if (r_short / r_long) < VOL_ACC_THRESHOLD:
                 equity_wt = 0.5
+
+    # ── Apply HMM regime scaling (continuous, not binary) ─────────────────────
+    regime_scale = _get_regime_scale(current_date)
+    equity_wt   *= regime_scale
+
+    # ── Route ─────────────────────────────────────────────────────────────────
+    if above_ma and abs_mom_ok and credit_ok and not vol_shock:
         weights["QQQ"] = equity_wt
-        if equity_wt < 1.0 and "SHY" in close.columns:
-            weights["SHY"] = 1.0 - equity_wt
-    elif above_ma_qqq and not credit_ok and not vol_shock:
-        # Stagflation: try GLD
-        gld_ok = False
+        remainder = 1.0 - equity_wt
+        if remainder > 0.01 and "SHY" in close.columns:
+            weights["SHY"] = remainder
+
+    elif above_ma and not credit_ok and not vol_shock:
         if "GLD" in close.columns:
             gld = close["GLD"].dropna()
-            if len(gld) >= MOM_WINDOW:
-                gld_mom = gld.iloc[-1] / gld.iloc[-MOM_WINDOW] - 1
-                gld_ok = gld_mom > 0
-        if gld_ok:
-            weights["GLD"] = 1.0
-        else:
-            bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
-            _assign_bonds(weights, bond_candidates, close)
+            if len(gld) >= MOM_WINDOW and float(gld.iloc[-1]) > float(gld.iloc[-MOM_WINDOW]):
+                weights["GLD"] = 1.0
+                return weights
+        _assign_bonds(weights, _bond_candidates(close, BOND_MOM_WINDOW), close)
     else:
-        bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
-        _assign_bonds(weights, bond_candidates, close)
+        _assign_bonds(weights, _bond_candidates(close, BOND_MOM_WINDOW), close)
+
     return weights
 
 
-def _get_bond_candidates(close, mom_window, vol_window):
+def _bond_candidates(close, mom_window):
     candidates = []
     for bond in BOND_UNIVERSE:
         if bond not in close.columns:
             continue
         s = close[bond].dropna()
-        if len(s) < max(mom_window, vol_window + 1):
+        if len(s) < mom_window:
             continue
-        mom = s.iloc[-1] / s.iloc[-mom_window] - 1
-        if mom <= 0:
+        if float(s.iloc[-1]) <= float(s.iloc[-mom_window]):
             continue
-        vol = s.pct_change().iloc[-vol_window:].std() * np.sqrt(252)
-        candidates.append((bond, vol))
+        vol = s.pct_change().iloc[-BOND_VOL_WINDOW:].std() * np.sqrt(252)
+        candidates.append((bond, float(vol)))
     return candidates
 
 
-def _assign_bonds(weights, bond_candidates, close):
-    if not bond_candidates:
+def _assign_bonds(weights, candidates, close):
+    if not candidates:
         if "SHY" in close.columns:
             weights["SHY"] = 1.0
-    else:
-        inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
-        inv_vols /= inv_vols.sum()
-        for (bond, _), w in zip(bond_candidates, inv_vols):
-            weights[bond] = w
+        return
+    inv_vols = np.array([1.0 / (v + 1e-9) for _, v in candidates])
+    inv_vols /= inv_vols.sum()
+    for (bond, _), w in zip(candidates, inv_vols):
+        weights[bond] = float(w)
