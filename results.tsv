@@ -29,4 +29,4 @@ a3948b0	1.0524	16/18	-18.97	0.9	keep	GLD stagflation regime — credit-stress bu
 10d2dff	1.0619	16/18	-15.26	0.8	keep	volume accumulation confirmation — low volume momentum scales down equity exposure
 ed10149	1.1085	16/18	-15.49	0.9	keep	parameter tuning — vol_shock=1.75x, bond_mom=84d, vol_acc_threshold=0.85
 6ef0b07	1.2329	17/18	-13.22	0.9	keep	Bayesian hyperparameter optimization (300 trials, optuna TPE) — sharpe +11%
-pending	1.2909	16/18	-12.40	1.0	keep	HMM regime scores (crisis_prob + entropy) as continuous equity scaler — CAGR 15.3%, Calmar 1.23
+8a1da61	1.2909	16/18	-12.40	1.0	keep	HMM regime scores (crisis_prob + entropy) as continuous equity scaler — CAGR 15.3%, Calmar 1.23
