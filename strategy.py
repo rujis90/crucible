@@ -29,7 +29,7 @@ MA_FAST    = 50
 VOL_WINDOW = 63
 VOL_SHORT  = 10
 VOL_MULT   = 2.0
-TOP_N      = 20
+TOP_N      = 15
 
 BOND_TICKERS = ["TLT", "IEF", "AGG", "SHY"]
 
