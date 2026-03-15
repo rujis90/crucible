@@ -8,10 +8,10 @@ Interface contract (do not rename these):
   - get_weights(data) -> pd.Series — return target portfolio weights
 
 ─────────────────────────────────────────────────────────────────────────────
-R13: GLD as stagflation regime (3rd regime)
-If credit fails (HYG below MA200) but equity has no vol shock and QQQ
-above MA200 → stagflation/inflation regime → allocate to GLD if positive
-momentum, else bonds.
+R14: Volume accumulation confirmation
+In bull mode, add volume momentum check: if 21d avg vol < 63d avg vol
+(distribution signal), scale down QQQ exposure to 50%. Catches institutional
+selling disguised in a rising price.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -27,10 +27,13 @@ MOM_WINDOW = 126   # 6-month
 BOND_MOM_WINDOW = 63
 BOND_VOL_WINDOW = 21
 BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
+VOL_ACC_SHORT = 21
+VOL_ACC_LONG = 63
 
 
 def get_weights(data: dict) -> pd.Series:
     close = data["close"]
+    volume = data["volume"]
     weights = pd.Series(0.0, index=close.columns)
     if "QQQ" not in close.columns:
         return weights
@@ -62,10 +65,20 @@ def get_weights(data: dict) -> pd.Series:
     vol_shock = vol_short > VOL_SHOCK_MULT * vol_long
 
     if above_ma_qqq and abs_mom_ok and credit_ok and not vol_shock:
-        weights["QQQ"] = 1.0
+        # Volume accumulation check
+        equity_wt = 1.0
+        if "QQQ" in volume.columns and len(volume["QQQ"].dropna()) >= VOL_ACC_LONG:
+            qqq_vol = volume["QQQ"].dropna()
+            avg_vol_short = qqq_vol.iloc[-VOL_ACC_SHORT:].mean()
+            avg_vol_long = qqq_vol.iloc[-VOL_ACC_LONG:].mean()
+            if avg_vol_long > 0 and avg_vol_short < 0.8 * avg_vol_long:
+                # Weak volume — distribution signal — scale down to 50%
+                equity_wt = 0.5
+        weights["QQQ"] = equity_wt
+        if equity_wt < 1.0 and "SHY" in close.columns:
+            weights["SHY"] = 1.0 - equity_wt
     elif above_ma_qqq and not credit_ok and not vol_shock:
-        # Stagflation: equity technically fine, but credit stressed
-        # Try GLD if positive momentum
+        # Stagflation: try GLD
         gld_ok = False
         if "GLD" in close.columns:
             gld = close["GLD"].dropna()
@@ -75,27 +88,11 @@ def get_weights(data: dict) -> pd.Series:
         if gld_ok:
             weights["GLD"] = 1.0
         else:
-            # Fall through to bond rotation
             bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
-            if not bond_candidates:
-                if "SHY" in close.columns:
-                    weights["SHY"] = 1.0
-            else:
-                inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
-                inv_vols /= inv_vols.sum()
-                for (bond, _), w in zip(bond_candidates, inv_vols):
-                    weights[bond] = w
+            _assign_bonds(weights, bond_candidates, close)
     else:
-        # Full defensive: inv-vol weighted bonds
         bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
-        if not bond_candidates:
-            if "SHY" in close.columns:
-                weights["SHY"] = 1.0
-        else:
-            inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
-            inv_vols /= inv_vols.sum()
-            for (bond, _), w in zip(bond_candidates, inv_vols):
-                weights[bond] = w
+        _assign_bonds(weights, bond_candidates, close)
     return weights
 
 
@@ -113,3 +110,14 @@ def _get_bond_candidates(close, mom_window, vol_window):
         vol = s.pct_change().iloc[-vol_window:].std() * np.sqrt(252)
         candidates.append((bond, vol))
     return candidates
+
+
+def _assign_bonds(weights, bond_candidates, close):
+    if not bond_candidates:
+        if "SHY" in close.columns:
+            weights["SHY"] = 1.0
+    else:
+        inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
+        inv_vols /= inv_vols.sum()
+        for (bond, _), w in zip(bond_candidates, inv_vols):
+            weights[bond] = w
