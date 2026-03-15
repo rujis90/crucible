@@ -164,8 +164,26 @@ def get_weights(data: dict) -> pd.Series:
     log_rets = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
 
     # Momentum windows
-    raw_mom = close.iloc[-21] / close.iloc[-147] - 1    # 6m-1m
+    raw_mom = close.iloc[-21] / close.iloc[-147] - 1    # 6m-1m (used for eligibility filter)
     mom_1m  = close.iloc[-1]  / close.iloc[-21]  - 1    # 1 month
+
+    # ── Idiosyncratic momentum (Simons/Medallion: "regress first, then measure")
+    # Remove SPY market beta from each asset's return before ranking.
+    # raw_mom includes common market return — all assets rising with SPY is not alpha.
+    # The residual (alpha) is what will continue when the tide turns.
+    # Keep raw_mom > 0 as the eligibility gate (absolute momentum, crash protection).
+    # Use idio_mom for weighting (relative quality of momentum).
+    idio_mom = raw_mom.copy()
+    if "SPY" in log_rets.columns:
+        spy_w = log_rets["SPY"].iloc[-147:-21].dropna()
+        if len(spy_w) >= 60:
+            spy_var = float(spy_w.var()) + 1e-9
+            for _t in close.columns:
+                _aw = log_rets[_t].reindex(spy_w.index).dropna()
+                if len(_aw) >= 60:
+                    _sp = spy_w.reindex(_aw.index)
+                    _beta = float(np.cov(_aw.values, _sp.values)[0, 1]) / spy_var
+                    idio_mom[_t] = float((_aw - _beta * _sp).sum())
 
     weights = pd.Series(0.0, index=close.columns)
 
@@ -354,7 +372,7 @@ def get_weights(data: dict) -> pd.Series:
     # Layer 2 (new):    × non-normal score (Hurst, skew, accel, Kelly)
     #   — amplifies the proven weights toward better distributional structure
     inv_vol_top  = 1.0 / vol[top]
-    mom_score    = raw_mom[top].clip(lower=0)
+    mom_score    = idio_mom[top].clip(lower=0)   # idiosyncratic, not raw
     mom_3m       = close.iloc[-21] / close.iloc[-63] - 1
     mom_3m_score = mom_3m[top].clip(lower=-0.3, upper=0.3)
 
