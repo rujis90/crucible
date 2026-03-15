@@ -66,7 +66,7 @@ VOL_WINDOW  = 63
 VOL_SHORT   = 10
 VOL_MULT    = 2.0
 TOP_N       = 15
-MAX_DD_CEIL = 0.20   # empirical drawdown ceiling — distribution-free scaling
+MAX_DD_CEIL = 0.15   # empirical drawdown ceiling — tighter = less variance drag
 
 # Excluded from equity eligible pool in bull mode.
 # Fixed income dominates any low-vol or Kelly metric (variance → 0 → Kelly → ∞).
@@ -172,8 +172,21 @@ def get_weights(data: dict) -> pd.Series:
     if "SPY" in close.columns:
         spy_ret   = close["SPY"].pct_change().dropna()
         vol_shock = spy_ret.iloc[-VOL_SHORT:].std() > VOL_MULT * spy_ret.iloc[-VOL_WINDOW:].std()
+
+        # Fresh recovery: SPY was below its MA200 at any point in last 63 days.
+        # In this state Hurst scores are contaminated by the prior bear —
+        # suppress the Hurst penalty so recovery momentum can lead.
+        if len(close) >= MA_SLOW + 63:
+            rolling_ma200  = close["SPY"].rolling(MA_SLOW).mean()
+            spy_last63     = close["SPY"].iloc[-63:]
+            ma200_last63   = rolling_ma200.iloc[-63:]
+            was_below      = bool((spy_last63 < ma200_last63).any())
+            fresh_recovery = spy_uptrend and was_below
+        else:
+            fresh_recovery = False
     else:
-        vol_shock = False
+        vol_shock      = False
+        fresh_recovery = False
 
     if "HYG" in close.columns:
         credit_ok = price["HYG"] >= ma_slow["HYG"]
@@ -199,9 +212,6 @@ def get_weights(data: dict) -> pd.Series:
         return _apply_dd_ceiling(weights, log_rets, MAX_DD_CEIL)
 
     # ── Eligible assets: equity only, above 200-MA, positive 6m-1m momentum ──
-    # Bonds excluded here: they belong to bear rotation only. In bull mode they
-    # dominate any low-vol or Kelly metric (near-zero variance → Kelly → ∞),
-    # crowding out the equity we're actually trying to select.
     eligible = [t for t in vol.index
                 if t not in FIXED_INCOME
                 and price[t] > ma_slow[t]
@@ -215,7 +225,7 @@ def get_weights(data: dict) -> pd.Series:
     for t in eligible:
         rets_t = log_rets[t].dropna()
         if len(rets_t) < 80:
-            scores[t] = 0.0
+            scores[t] = (0.0, 0.0, 0.0, 0.0, 0.0)
             continue
 
         window = rets_t.iloc[-126:]   # 6 months of log returns
@@ -224,51 +234,97 @@ def get_weights(data: dict) -> pd.Series:
         # Measures persistence: H > 0.5 means the asset is genuinely trending,
         # not just randomly high. Only trend in trending regimes.
         h = _hurst_rs(window)
-        hurst_contrib = (h - 0.5) * 4.0    # H=0.75→+1.0, H=0.5→0, H=0.25→-1.0
+        raw_hurst = (h - 0.5) * 4.0        # H=0.75→+1.0, H=0.5→0, H=0.25→-1.0
+        # In fresh recovery the bear crash contaminates the Hurst window —
+        # only keep positive Hurst (don't penalise, just don't reward)
+        hurst_contrib = max(0.0, raw_hurst) if fresh_recovery else raw_hurst
 
-        # ── 2. Return skewness (Taleb — antifragility) ────────────────────────
-        # Positive skew: fat right tail = we win big occasionally, lose small.
-        # Negative skew: fat left tail = we win small, lose catastrophically.
-        # The right-skewed asset is antifragile; the left-skewed one is fragile.
-        skew          = float(window.skew())
-        skew_contrib  = np.clip(skew * 0.5, -0.5, 0.5)
+        # ── 2. Tail ratio (Taleb — antifragility, no normality) ───────────────
+        # Tail ratio = 95th pctile / |5th pctile|. > 1 = right tail fatter.
+        # More robust than skewness: directly measures the ratio of extreme wins
+        # to extreme losses without assuming any distribution shape.
+        p95 = float(np.percentile(window, 95))
+        p05 = abs(float(np.percentile(window, 5))) + 1e-9
+        tail_ratio    = p95 / p05
+        skew_contrib  = np.clip((tail_ratio - 1.0) * 0.5, -0.5, 0.5)
 
         # ── 3. Momentum acceleration (Sornette) ───────────────────────────────
-        # Compare annualized 1-month rate vs annualized 6-month rate.
-        # Accelerating = trend is strengthening → ride it.
-        # Decelerating = trend is dying → reduce before the endogenous crash.
-        # Extreme acceleration (blow-off top) = cap to avoid bubble exposure.
+        # Two timeframes must agree for full credit:
+        #   short: 1m vs 3m annualized (near-term acceleration)
+        #   medium: 3m vs 6m annualized (medium-term trend strengthening)
+        # If both accelerating → stronger signal. If diverging → partial credit.
+        mom_3m_t      = close[t].iloc[-1]  / close[t].iloc[-63]  - 1
         ann_1m        = (1 + float(mom_1m[t]))   ** 12 - 1
+        ann_3m        = (1 + float(mom_3m_t))    ** 4  - 1
         ann_6m        = (1 + float(raw_mom[t]))  ** 2  - 1
-        accel         = ann_1m - ann_6m
+        accel_short   = ann_1m - ann_3m   # 1m vs 3m
+        accel_medium  = ann_3m - ann_6m   # 3m vs 6m
+        # Average both; cap extremes
+        accel         = (accel_short + accel_medium) / 2.0
         accel_contrib = float(np.clip(accel, -0.6, 0.25))
 
         # ── 4. Kelly proxy (Spitznagel — maximize CAGR) ───────────────────────
-        # Kelly criterion: optimal bet = geometric_return / variance.
-        # Stored raw; normalized across the pool after the loop so no single
-        # ultra-low-vol asset monopolizes the score.
         geo_ret  = float(window.mean()) * 252
         variance = float(window.var())  * 252
-        kelly    = geo_ret / (variance + 1e-6)   # raw Kelly fraction
+        kelly    = geo_ret / (variance + 1e-6)
 
-        scores[t] = (hurst_contrib, skew_contrib, accel_contrib, kelly)
+        # ── 5. Crash resilience (Taleb — conditional anti-fragility) ─────────
+        # Tail ratio captures distributional shape in isolation.
+        # This captures performance CONDITIONED ON ACTUAL MARKET CRASH DAYS —
+        # a fundamentally different measure: does this asset hold up when it
+        # matters most? Assets that fall less than the market during crashes are
+        # anti-fragile (Taleb). We use SPY's worst-10% days as crash events.
+        if "SPY" in log_rets.columns:
+            mkt_w = log_rets["SPY"].reindex(window.index).dropna()
+            if len(mkt_w) >= 20:
+                crash_thresh = float(mkt_w.quantile(0.10))
+                crash_mask   = mkt_w <= crash_thresh
+                if crash_mask.sum() >= 5:
+                    crash_ret     = float(window.reindex(mkt_w.index)[crash_mask].mean())
+                    mkt_crash_ret = float(mkt_w[crash_mask].mean())
+                    # fragility_ratio > 1 = falls more than market (fragile)
+                    # fragility_ratio < 1 = falls less (robust, anti-fragile)
+                    frag_ratio    = crash_ret / (mkt_crash_ret + 1e-9)
+                    crash_contrib = float(np.clip((1.0 - frag_ratio) * 0.25, -0.3, 0.3))
+                else:
+                    crash_contrib = 0.0
+            else:
+                crash_contrib = 0.0
+        else:
+            crash_contrib = 0.0
+
+        scores[t] = (hurst_contrib, skew_contrib, accel_contrib, kelly, crash_contrib)
 
     # Unpack raw scores and normalize Kelly within the pool
     # Kelly raw values span huge ranges across different asset types — normalize
     # to [-0.3, 0.6] relative to the pool median so no asset dominates
-    score_df   = pd.DataFrame(scores, index=["hurst","skew","accel","kelly"]).T
+    score_df   = pd.DataFrame(scores, index=["hurst","skew","accel","kelly","crash"]).T
     kelly_raw  = score_df["kelly"]
     kelly_med  = kelly_raw.median()
     kelly_std  = kelly_raw.std() + 1e-6
     kelly_norm = ((kelly_raw - kelly_med) / kelly_std * 0.3).clip(-0.3, 0.6)
 
     scores_s = (score_df["hurst"] + score_df["skew"]
-                + score_df["accel"] + kelly_norm)
+                + score_df["accel"] + kelly_norm + score_df["crash"])
+
+    # ── Dynamic TOP_N: high score spread = signals agree = concentrate ────────
+    # When the composite scores are tightly clustered, signals are uncertain —
+    # diversify. When spread is wide, signals strongly distinguish winners —
+    # concentrate into the best ones.
+    if len(scores_s) >= 5:
+        score_std = scores_s.std()
+        score_med_std = scores_s.rolling(1).std().median() if len(scores_s) > 1 else 0
+        if score_std > 0.8:
+            dyn_top_n = max(8, TOP_N - 5)    # high conviction → concentrate to 10
+        elif score_std > 0.5:
+            dyn_top_n = max(10, TOP_N - 3)   # moderate conviction → 12
+        else:
+            dyn_top_n = TOP_N                # uncertain → full diversification
+    else:
+        dyn_top_n = min(TOP_N, len(eligible))
 
     # ── Selection: lowest ATR vol among eligible (proven crash-resilient base) ─
-    # Vol-first selection keeps us in the calmest assets — they fall less in
-    # onset of crashes before the regime gate triggers.
-    top = vol[eligible].nsmallest(TOP_N).index
+    top = vol[eligible].nsmallest(dyn_top_n).index
 
     # Restrict scoring to selected top — avoids negative-score fallback
     # shrinking the pool to 5 assets in post-crash recovery periods
@@ -282,17 +338,26 @@ def get_weights(data: dict) -> pd.Series:
     mom_score    = raw_mom[top].clip(lower=0)
     mom_3m       = close.iloc[-21] / close.iloc[-63] - 1
     mom_3m_score = mom_3m[top].clip(lower=-0.3, upper=0.3)
+
     if mom_score.sum() > 0:
         momentum_base = inv_vol_top * (1 + mom_score) * (1 + 0.5 * mom_3m_score)
     else:
         momentum_base = inv_vol_top
 
-    # Non-normal tilt: shift scores to [0.5, 1.5] range so they multiply the
-    # momentum base without flipping signs or dominating it
-    score_min    = scores_s[top].min()
-    score_max    = scores_s[top].max()
-    score_range  = score_max - score_min + 1e-9
-    score_normed = 0.5 + (scores_s[top] - score_min) / score_range   # 0.5 → 1.5
+    # Non-normal tilt: shift scores to [lo, hi] range as a multiplier on the
+    # momentum base. Range is adaptive: when signals strongly agree (high
+    # score_std), concentrate the bet; when signals are uncertain, flatten
+    # weights to diversify. Consistent with dynamic TOP_N philosophy.
+    score_min   = scores_s[top].min()
+    score_max   = scores_s[top].max()
+    score_range = score_max - score_min + 1e-9
+    if score_std > 0.8:
+        lo, hi = 0.4, 1.6   # high conviction — wide tilt, bet on winners
+    elif score_std > 0.5:
+        lo, hi = 0.5, 1.5   # normal regime
+    else:
+        lo, hi = 0.7, 1.3   # uncertain — narrow tilt, stay diversified
+    score_normed = lo + (scores_s[top] - score_min) / score_range * (hi - lo)
     composite    = momentum_base * score_normed
     weights[top] = composite / composite.sum()
 
