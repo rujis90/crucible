@@ -94,16 +94,7 @@ def get_weights(data: dict) -> pd.Series:
         if eligible:
             top = vol[eligible].nsmallest(TOP_N).index
             inv_vol = 1.0 / vol[top]
-            # Participation scaling: narrow markets = reduce equity exposure
-            universe_size = (price > ma_slow).sum()
-            participation = len(eligible) / max(universe_size, 1)
-            eq_scale = min(1.0, participation * 2)
-            weights[top] = inv_vol / inv_vol.sum() * eq_scale
-            if eq_scale < 1.0:
-                rotate_to_bonds()
-                total = weights.sum()
-                if total > 1.0:
-                    weights /= total
+            weights[top] = inv_vol / inv_vol.sum()
         else:
             rotate_to_bonds()
     else:
