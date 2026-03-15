@@ -8,10 +8,10 @@ Interface contract (do not rename these):
   - get_weights(data) -> pd.Series — return target portfolio weights
 
 ─────────────────────────────────────────────────────────────────────────────
-R14: Volume accumulation confirmation
-In bull mode, add volume momentum check: if 21d avg vol < 63d avg vol
-(distribution signal), scale down QQQ exposure to 50%. Catches institutional
-selling disguised in a rising price.
+R15: Parameter tuning
+- Tighten vol shock to 1.75x (more sensitive)
+- Lower volume distribution threshold to 0.85 (less aggressive scaling)
+- Extend bond momentum window to 84 days (4-month for more stability)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -22,13 +22,14 @@ REBALANCE_EVERY = 21
 MA_SLOW = 200
 VOL_SHORT = 10
 VOL_LONG = 60
-VOL_SHOCK_MULT = 2.0
+VOL_SHOCK_MULT = 1.75  # tightened from 2.0
 MOM_WINDOW = 126   # 6-month
-BOND_MOM_WINDOW = 63
+BOND_MOM_WINDOW = 84   # 4-month (tuned from 63)
 BOND_VOL_WINDOW = 21
 BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
 VOL_ACC_SHORT = 21
 VOL_ACC_LONG = 63
+VOL_ACC_THRESHOLD = 0.85  # tuned from 0.80
 
 
 def get_weights(data: dict) -> pd.Series:
@@ -71,8 +72,7 @@ def get_weights(data: dict) -> pd.Series:
             qqq_vol = volume["QQQ"].dropna()
             avg_vol_short = qqq_vol.iloc[-VOL_ACC_SHORT:].mean()
             avg_vol_long = qqq_vol.iloc[-VOL_ACC_LONG:].mean()
-            if avg_vol_long > 0 and avg_vol_short < 0.8 * avg_vol_long:
-                # Weak volume — distribution signal — scale down to 50%
+            if avg_vol_long > 0 and avg_vol_short < VOL_ACC_THRESHOLD * avg_vol_long:
                 equity_wt = 0.5
         weights["QQQ"] = equity_wt
         if equity_wt < 1.0 and "SHY" in close.columns:
