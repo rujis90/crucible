@@ -8,9 +8,9 @@ Interface contract (do not rename these):
   - get_weights(data) -> pd.Series — return target portfolio weights
 
 ─────────────────────────────────────────────────────────────────────────────
-R06: Add absolute momentum filter to bull mode
-QQQ must be above MA200 AND have positive 6m absolute momentum.
-If QQQ fails absolute mom, go defensive even if above MA200.
+R11: Inv-vol weighted bond rotation when defensive
+When defensive, pick from [TLT, IEF, SHY] based on positive momentum,
+inv-vol weighted. Rate-environment adaptive without volatility drag.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -22,7 +22,10 @@ MA_SLOW = 200
 VOL_SHORT = 10
 VOL_LONG = 60
 VOL_SHOCK_MULT = 2.0
-MOM_WINDOW = 126  # 6-month absolute momentum
+MOM_WINDOW = 126   # 6-month
+BOND_MOM_WINDOW = 63  # 3-month bond momentum
+BOND_VOL_WINDOW = 21
+BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
 
 
 def get_weights(data: dict) -> pd.Series:
@@ -59,6 +62,28 @@ def get_weights(data: dict) -> pd.Series:
 
     if above_ma_qqq and abs_mom_ok and credit_ok and not vol_shock:
         weights["QQQ"] = 1.0
-    elif "SHY" in close.columns:
-        weights["SHY"] = 1.0
+    else:
+        # Inv-vol weighted among bonds with positive momentum
+        bond_candidates = []
+        for bond in BOND_UNIVERSE:
+            if bond not in close.columns:
+                continue
+            s = close[bond].dropna()
+            if len(s) < max(BOND_MOM_WINDOW, BOND_VOL_WINDOW + 1):
+                continue
+            mom = s.iloc[-1] / s.iloc[-BOND_MOM_WINDOW] - 1
+            if mom <= 0:
+                continue
+            vol = s.pct_change().iloc[-BOND_VOL_WINDOW:].std() * np.sqrt(252)
+            bond_candidates.append((bond, vol))
+
+        if not bond_candidates:
+            # Fallback to SHY
+            if "SHY" in close.columns:
+                weights["SHY"] = 1.0
+        else:
+            inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
+            inv_vols /= inv_vols.sum()
+            for (bond, _), w in zip(bond_candidates, inv_vols):
+                weights[bond] = w
     return weights
