@@ -58,8 +58,9 @@ def get_weights(data: dict) -> pd.Series:
     hc  = (high - prev_close).abs() / close
     lc  = (low  - prev_close).abs() / close
     atr = pd.concat([hl, hc, lc]).groupby(level=0).max()
-    vol = atr.iloc[-VOL_WINDOW:].mean()
+    vol     = atr.iloc[-VOL_WINDOW:].mean()
     raw_mom = close.iloc[-21] / close.iloc[-147] - 1
+    mom_3m  = close.iloc[-21] / close.iloc[-63] - 1    # 3m momentum: soft quality signal
 
     weights = pd.Series(0.0, index=close.columns)
 
@@ -95,10 +96,12 @@ def get_weights(data: dict) -> pd.Series:
         eligible = vol.index[(price > ma_slow) & (raw_mom > 0)].tolist()
         if eligible:
             top = vol[eligible].nsmallest(TOP_N).index
-            inv_vol = 1.0 / vol[top]
+            inv_vol   = 1.0 / vol[top]
             mom_score = raw_mom[top].clip(lower=0)
+            # Soft 3m confirmation: boost assets where 3m momentum agrees, reduce where it diverges
+            mom_3m_score = mom_3m[top].clip(lower=-0.3, upper=0.3)
             if mom_score.sum() > 0:
-                composite = inv_vol * (1 + mom_score)
+                composite = inv_vol * (1 + mom_score) * (1 + 0.5 * mom_3m_score)
             else:
                 composite = inv_vol
             weights[top] = composite / composite.sum()
