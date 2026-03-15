@@ -227,7 +227,7 @@ def get_weights(data: dict) -> pd.Series:
     for t in eligible:
         rets_t = log_rets[t].dropna()
         if len(rets_t) < 80:
-            scores[t] = (0.0, 0.0, 0.0, 0.0, 0.0)  # hurst,skew,accel,kelly,crash
+            scores[t] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # hurst,skew,accel,kelly,crash,volume
             continue
 
         window = rets_t.iloc[-126:]   # 6 months of log returns
@@ -291,12 +291,26 @@ def get_weights(data: dict) -> pd.Series:
         else:
             crash_contrib = 0.0
 
-        scores[t] = (hurst_contrib, skew_contrib, accel_contrib, kelly, crash_contrib)
+        # ── 6. Volume momentum (institutional accumulation/distribution) ──────
+        # Rising price + increasing volume = institutional accumulation.
+        # Rising price + falling volume = distribution (weak, likely to reverse).
+        # Volume is Wyckoff's invisible hand — reveals who's actually buying.
+        # vol_ratio > 1: recent volume > historical → accumulation signal.
+        vol_t = data["volume"][t].dropna()
+        if len(vol_t) >= 63:
+            vol_21 = float(vol_t.iloc[-21:].mean())
+            vol_63 = float(vol_t.iloc[-63:].mean()) + 1e-9
+            vol_ratio = vol_21 / vol_63     # > 1 = increasing volume
+            vol_contrib = float(np.clip((vol_ratio - 1.0) * 0.5, -0.3, 0.3))
+        else:
+            vol_contrib = 0.0
+
+        scores[t] = (hurst_contrib, skew_contrib, accel_contrib, kelly, crash_contrib, vol_contrib)
 
     # Unpack raw scores and normalize Kelly within the pool
     # Kelly raw values span huge ranges across different asset types — normalize
     # to [-0.3, 0.6] relative to the pool median so no asset dominates
-    score_df   = pd.DataFrame(scores, index=["hurst","skew","accel","kelly","crash"]).T
+    score_df   = pd.DataFrame(scores, index=["hurst","skew","accel","kelly","crash","volume"]).T
 
     # Cross-sectional normalization: each signal to [-0.3, +0.6] z-score range
     # relative to pool median. This equalizes signal contribution so no single
@@ -306,13 +320,14 @@ def get_weights(data: dict) -> pd.Series:
         m = col.median(); s = col.std() + 1e-6
         return ((col - m) / s * 0.3).clip(lo, hi)
 
-    hurst_norm = _xsnorm(score_df["hurst"])
-    skew_norm  = _xsnorm(score_df["skew"])
-    accel_norm = _xsnorm(score_df["accel"])
-    kelly_norm = _xsnorm(score_df["kelly"])
-    crash_norm = _xsnorm(score_df["crash"])
+    hurst_norm  = _xsnorm(score_df["hurst"])
+    skew_norm   = _xsnorm(score_df["skew"])
+    accel_norm  = _xsnorm(score_df["accel"])
+    kelly_norm  = _xsnorm(score_df["kelly"])
+    crash_norm  = _xsnorm(score_df["crash"])
+    volume_norm = _xsnorm(score_df["volume"])
 
-    scores_s = hurst_norm + skew_norm + accel_norm + kelly_norm + crash_norm
+    scores_s = hurst_norm + skew_norm + accel_norm + kelly_norm + crash_norm + volume_norm
 
     # ── Dynamic TOP_N: high score spread = signals agree = concentrate ────────
     # When the composite scores are tightly clustered, signals are uncertain —
