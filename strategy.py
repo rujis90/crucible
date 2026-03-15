@@ -8,9 +8,10 @@ Interface contract (do not rename these):
   - get_weights(data) -> pd.Series — return target portfolio weights
 
 ─────────────────────────────────────────────────────────────────────────────
-R11: Inv-vol weighted bond rotation when defensive
-When defensive, pick from [TLT, IEF, SHY] based on positive momentum,
-inv-vol weighted. Rate-environment adaptive without volatility drag.
+R13: GLD as stagflation regime (3rd regime)
+If credit fails (HYG below MA200) but equity has no vol shock and QQQ
+above MA200 → stagflation/inflation regime → allocate to GLD if positive
+momentum, else bonds.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -23,7 +24,7 @@ VOL_SHORT = 10
 VOL_LONG = 60
 VOL_SHOCK_MULT = 2.0
 MOM_WINDOW = 126   # 6-month
-BOND_MOM_WINDOW = 63  # 3-month bond momentum
+BOND_MOM_WINDOW = 63
 BOND_VOL_WINDOW = 21
 BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
 
@@ -62,23 +63,32 @@ def get_weights(data: dict) -> pd.Series:
 
     if above_ma_qqq and abs_mom_ok and credit_ok and not vol_shock:
         weights["QQQ"] = 1.0
+    elif above_ma_qqq and not credit_ok and not vol_shock:
+        # Stagflation: equity technically fine, but credit stressed
+        # Try GLD if positive momentum
+        gld_ok = False
+        if "GLD" in close.columns:
+            gld = close["GLD"].dropna()
+            if len(gld) >= MOM_WINDOW:
+                gld_mom = gld.iloc[-1] / gld.iloc[-MOM_WINDOW] - 1
+                gld_ok = gld_mom > 0
+        if gld_ok:
+            weights["GLD"] = 1.0
+        else:
+            # Fall through to bond rotation
+            bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
+            if not bond_candidates:
+                if "SHY" in close.columns:
+                    weights["SHY"] = 1.0
+            else:
+                inv_vols = np.array([1.0 / (v + 1e-9) for _, v in bond_candidates])
+                inv_vols /= inv_vols.sum()
+                for (bond, _), w in zip(bond_candidates, inv_vols):
+                    weights[bond] = w
     else:
-        # Inv-vol weighted among bonds with positive momentum
-        bond_candidates = []
-        for bond in BOND_UNIVERSE:
-            if bond not in close.columns:
-                continue
-            s = close[bond].dropna()
-            if len(s) < max(BOND_MOM_WINDOW, BOND_VOL_WINDOW + 1):
-                continue
-            mom = s.iloc[-1] / s.iloc[-BOND_MOM_WINDOW] - 1
-            if mom <= 0:
-                continue
-            vol = s.pct_change().iloc[-BOND_VOL_WINDOW:].std() * np.sqrt(252)
-            bond_candidates.append((bond, vol))
-
+        # Full defensive: inv-vol weighted bonds
+        bond_candidates = _get_bond_candidates(close, BOND_MOM_WINDOW, BOND_VOL_WINDOW)
         if not bond_candidates:
-            # Fallback to SHY
             if "SHY" in close.columns:
                 weights["SHY"] = 1.0
         else:
@@ -87,3 +97,19 @@ def get_weights(data: dict) -> pd.Series:
             for (bond, _), w in zip(bond_candidates, inv_vols):
                 weights[bond] = w
     return weights
+
+
+def _get_bond_candidates(close, mom_window, vol_window):
+    candidates = []
+    for bond in BOND_UNIVERSE:
+        if bond not in close.columns:
+            continue
+        s = close[bond].dropna()
+        if len(s) < max(mom_window, vol_window + 1):
+            continue
+        mom = s.iloc[-1] / s.iloc[-mom_window] - 1
+        if mom <= 0:
+            continue
+        vol = s.pct_change().iloc[-vol_window:].std() * np.sqrt(252)
+        candidates.append((bond, vol))
+    return candidates
