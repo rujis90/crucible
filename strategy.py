@@ -67,6 +67,7 @@ VOL_SHORT   = 10
 VOL_MULT    = 2.0
 TOP_N       = 15
 MAX_DD_CEIL = 0.15   # empirical drawdown ceiling — tighter = less variance drag
+TARGET_VOL  = 0.16   # proactive vol target: scale down BEFORE drawdown accumulates
 
 # Excluded from equity eligible pool in bull mode.
 # Fixed income dominates any low-vol or Kelly metric (variance → 0 → Kelly → ∞).
@@ -225,18 +226,14 @@ def get_weights(data: dict) -> pd.Series:
     for t in eligible:
         rets_t = log_rets[t].dropna()
         if len(rets_t) < 80:
-            scores[t] = (0.0, 0.0, 0.0, 0.0, 0.0)
+            scores[t] = (0.0, 0.0, 0.0, 0.0, 0.0)  # hurst,skew,accel,kelly,crash
             continue
 
         window = rets_t.iloc[-126:]   # 6 months of log returns
 
         # ── 1. Hurst exponent (Mandelbrot) ────────────────────────────────────
-        # Measures persistence: H > 0.5 means the asset is genuinely trending,
-        # not just randomly high. Only trend in trending regimes.
         h = _hurst_rs(window)
-        raw_hurst = (h - 0.5) * 4.0        # H=0.75→+1.0, H=0.5→0, H=0.25→-1.0
-        # In fresh recovery the bear crash contaminates the Hurst window —
-        # only keep positive Hurst (don't penalise, just don't reward)
+        raw_hurst = (h - 0.5) * 4.0
         hurst_contrib = max(0.0, raw_hurst) if fresh_recovery else raw_hurst
 
         # ── 2. Tail ratio (Taleb — antifragility, no normality) ───────────────
@@ -323,11 +320,8 @@ def get_weights(data: dict) -> pd.Series:
     else:
         dyn_top_n = min(TOP_N, len(eligible))
 
-    # ── Selection: lowest ATR vol among eligible (proven crash-resilient base) ─
+    # ── Selection: lowest ATR vol among eligible ──────────────────────────────
     top = vol[eligible].nsmallest(dyn_top_n).index
-
-    # Restrict scoring to selected top — avoids negative-score fallback
-    # shrinking the pool to 5 assets in post-crash recovery periods
 
     # ── Weighting: proven momentum base × non-normal score tilt ──────────────
     # Layer 1 (proven): inv_vol × momentum × 3m-confirmation
@@ -360,6 +354,18 @@ def get_weights(data: dict) -> pd.Series:
     score_normed = lo + (scores_s[top] - score_min) / score_range * (hi - lo)
     composite    = momentum_base * score_normed
     weights[top] = composite / composite.sum()
+
+    # ── Proactive vol targeting (applied before drawdown ceiling) ─────────────
+    # DD ceiling is reactive (acts after drawdown). Vol target is proactive:
+    # scale down when realized portfolio vol > TARGET_VOL, before loss accumulates.
+    # Together: vol target prevents drawdown from starting; DD ceiling caps it.
+    held_w = [t for t in weights[weights > 0].index if t in log_rets.columns]
+    if held_w:
+        port_log_21 = (log_rets[held_w].fillna(0) * weights[held_w]).sum(axis=1).iloc[-21:]
+        if len(port_log_21) >= 10:
+            realized_vol = float(port_log_21.std()) * np.sqrt(252)
+            if realized_vol > TARGET_VOL and realized_vol > 0:
+                weights = weights * (TARGET_VOL / realized_vol)
 
     # ── Empirical drawdown ceiling ────────────────────────────────────────────
     return _apply_dd_ceiling(weights, log_rets, MAX_DD_CEIL)
