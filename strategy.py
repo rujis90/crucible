@@ -94,7 +94,12 @@ def get_weights(data: dict) -> pd.Series:
         if eligible:
             top = vol[eligible].nsmallest(TOP_N).index
             inv_vol = 1.0 / vol[top]
-            weights[top] = inv_vol / inv_vol.sum()
+            mom_score = raw_mom[top].clip(lower=0)
+            if mom_score.sum() > 0:
+                composite = inv_vol * (1 + mom_score)
+            else:
+                composite = inv_vol
+            weights[top] = composite / composite.sum()
         else:
             rotate_to_bonds()
     else:
