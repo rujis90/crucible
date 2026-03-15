@@ -373,8 +373,21 @@ def get_weights(data: dict) -> pd.Series:
     #   — amplifies the proven weights toward better distributional structure
     inv_vol_top  = 1.0 / vol[top]
     mom_score    = idio_mom[top].clip(lower=0)   # idiosyncratic, not raw
-    mom_3m       = close.iloc[-21] / close.iloc[-63] - 1
-    mom_3m_score = mom_3m[top].clip(lower=-0.3, upper=0.3)
+
+    # Also beta-adjust the 3m confirmation — same "regress first" principle
+    mom_3m_raw   = close.iloc[-21] / close.iloc[-63] - 1
+    idio_mom_3m  = mom_3m_raw.copy()
+    if "SPY" in log_rets.columns:
+        spy_w3 = log_rets["SPY"].iloc[-63:-21].dropna()
+        if len(spy_w3) >= 20:
+            spy_var3 = float(spy_w3.var()) + 1e-9
+            for _t in close.columns:
+                _aw3 = log_rets[_t].reindex(spy_w3.index).dropna()
+                if len(_aw3) >= 20:
+                    _sp3 = spy_w3.reindex(_aw3.index)
+                    _b3  = float(np.cov(_aw3.values, _sp3.values)[0, 1]) / spy_var3
+                    idio_mom_3m[_t] = float((_aw3 - _b3 * _sp3).sum())
+    mom_3m_score = idio_mom_3m[top].clip(lower=-0.3, upper=0.3)
 
     if mom_score.sum() > 0:
         momentum_base = inv_vol_top * (1 + mom_score) * (1 + 0.5 * mom_3m_score)
