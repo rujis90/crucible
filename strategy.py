@@ -23,15 +23,90 @@ Weights returned:
 
 import pandas as pd
 
-REBALANCE_EVERY = 21    # monthly rebalance (~21 trading days)
+REBALANCE_EVERY = 21
+MA_SLOW    = 200
+MA_FAST    = 50
+VOL_WINDOW = 63
+VOL_SHORT  = 10
+VOL_MULT   = 2.0
+TOP_N      = 20
+
+BOND_TICKERS = ["TLT", "IEF", "AGG", "SHY"]
 
 
 def get_weights(data: dict) -> pd.Series:
     """
-    Baseline: equal-weight all assets (1/N portfolio).
-    No signal, no filter — just split the portfolio evenly.
-    Use this as a weak baseline to beat with a better strategy.
+    Low-vol + momentum: select TOP_N lowest-volatility assets with positive
+    6m-1m momentum AND above 200-MA. Equal-weight within the selection
+    (already pre-screened for low vol, further tilting adds noise).
+    Bear regime: equal-weight positive-momentum bonds.
     """
     close = data["close"]
-    tickers = close.columns
-    return pd.Series(1.0 / len(tickers), index=tickers)
+
+    if len(close) < max(MA_SLOW, VOL_WINDOW + 147):
+        return pd.Series(0.0, index=close.columns)
+
+    price   = close.iloc[-1]
+    ma_fast = close.iloc[-MA_FAST:].mean()
+    ma_slow = close.iloc[-MA_SLOW:].mean()
+    vol     = close.pct_change().iloc[-VOL_WINDOW:].std()
+    raw_mom = close.iloc[-21] / close.iloc[-147] - 1
+
+    weights = pd.Series(0.0, index=close.columns)
+
+    spy_uptrend = "SPY" not in close.columns or ma_fast["SPY"] >= ma_slow["SPY"]
+    if "SPY" in close.columns:
+        spy_ret   = close["SPY"].pct_change().dropna()
+        vol_shock = spy_ret.iloc[-VOL_SHORT:].std() > VOL_MULT * spy_ret.iloc[-VOL_WINDOW:].std()
+    else:
+        vol_shock = False
+
+    # Credit regime: HYG above its 50-MA = credit healthy = risk on
+    if "HYG" in close.columns:
+        credit_ok = price["HYG"] >= ma_slow["HYG"]   # price vs 200-MA: faster than crossover
+    else:
+        credit_ok = True
+
+
+    SHORT_BONDS = ["SHY", "IEF", "AGG"]   # rate-insensitive — prefer in rising-rate bear
+    LONG_BONDS  = ["TLT", "IEF", "AGG", "SHY"]
+
+    def rotate_to_bonds(panic=False):
+        bonds = [t for t in LONG_BONDS if t in close.columns]
+        if bonds:
+            if panic and "SHY" in bonds:
+                weights["SHY"] = 1.0
+            else:
+                # Prefer short-duration bonds: lower rate risk in slow bears
+                short = [t for t in SHORT_BONDS if t in close.columns]
+                pool  = short if short else bonds
+                pos   = raw_mom[pool][raw_mom[pool] > 0]
+                if not pos.empty:
+                    weights[pos.index] = 1.0 / len(pos)
+                else:
+                    # All short bonds negative — fall back to any positive bond
+                    pos2 = raw_mom[bonds][raw_mom[bonds] > 0]
+                    if not pos2.empty:
+                        weights[pos2.index] = 1.0 / len(pos2)
+
+    if spy_uptrend and credit_ok and not vol_shock:
+        eligible = vol.index[(price > ma_slow) & (raw_mom > 0)].tolist()
+        if eligible:
+            top = vol[eligible].nsmallest(TOP_N).index
+            inv_vol = 1.0 / vol[top]
+            # Participation scaling: narrow markets = reduce equity exposure
+            universe_size = (price > ma_slow).sum()
+            participation = len(eligible) / max(universe_size, 1)
+            eq_scale = min(1.0, participation * 2)
+            weights[top] = inv_vol / inv_vol.sum() * eq_scale
+            if eq_scale < 1.0:
+                rotate_to_bonds()
+                total = weights.sum()
+                if total > 1.0:
+                    weights /= total
+        else:
+            rotate_to_bonds()
+    else:
+        rotate_to_bonds(panic=vol_shock)
+
+    return weights
