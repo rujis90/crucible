@@ -46,10 +46,18 @@ def get_weights(data: dict) -> pd.Series:
     if len(close) < max(MA_SLOW, VOL_WINDOW + 147):
         return pd.Series(0.0, index=close.columns)
 
+    high    = data["high"]
+    low     = data["low"]
     price   = close.iloc[-1]
     ma_fast = close.iloc[-MA_FAST:].mean()
     ma_slow = close.iloc[-MA_SLOW:].mean()
-    vol     = close.pct_change().iloc[-VOL_WINDOW:].std()
+    # ATR-based volatility: captures gap risk beyond close-to-close moves
+    prev_close = close.shift(1)
+    hl  = (high - low)              / close
+    hc  = (high - prev_close).abs() / close
+    lc  = (low  - prev_close).abs() / close
+    atr = pd.concat([hl, hc, lc]).groupby(level=0).max()
+    vol = atr.iloc[-VOL_WINDOW:].mean()
     raw_mom = close.iloc[-21] / close.iloc[-147] - 1
 
     weights = pd.Series(0.0, index=close.columns)
