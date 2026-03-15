@@ -77,7 +77,6 @@ def get_weights(data: dict) -> pd.Series:
         credit_ok = True
 
 
-    SHORT_BONDS = ["SHY", "IEF", "AGG"]   # rate-insensitive — prefer in rising-rate bear
     LONG_BONDS  = ["TLT", "IEF", "AGG", "SHY"]
 
     def rotate_to_bonds(panic=False):
@@ -86,17 +85,11 @@ def get_weights(data: dict) -> pd.Series:
             if panic and "SHY" in bonds:
                 weights["SHY"] = 1.0
             else:
-                # Prefer short-duration bonds: lower rate risk in slow bears
-                short = [t for t in SHORT_BONDS if t in close.columns]
-                pool  = short if short else bonds
-                pos   = raw_mom[pool][raw_mom[pool] > 0]
-                if not pos.empty:
-                    weights[pos.index] = 1.0 / len(pos)
-                else:
-                    # All short bonds negative — fall back to any positive bond
-                    pos2 = raw_mom[bonds][raw_mom[bonds] > 0]
-                    if not pos2.empty:
-                        weights[pos2.index] = 1.0 / len(pos2)
+                # Adaptive inv-vol bond weighting: high-ATR bonds (rising rates) get less weight
+                pos = [t for t in bonds if raw_mom[t] > 0]
+                if pos:
+                    inv_vol_b = 1.0 / vol[pos]
+                    weights[pd.Index(pos)] = (inv_vol_b / inv_vol_b.sum()).values
 
     if spy_uptrend and credit_ok and not vol_shock:
         eligible = vol.index[(price > ma_slow) & (raw_mom > 0)].tolist()
