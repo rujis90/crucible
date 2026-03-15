@@ -30,6 +30,7 @@ VOL_WINDOW = 63
 VOL_SHORT  = 10
 VOL_MULT   = 2.0
 TOP_N      = 15
+TARGET_VOL = 0.14          # annual vol target for portfolio scaling
 
 BOND_TICKERS = ["TLT", "IEF", "AGG", "SHY"]
 
@@ -112,5 +113,12 @@ def get_weights(data: dict) -> pd.Series:
             rotate_to_bonds()
     else:
         rotate_to_bonds(panic=vol_shock)
+
+    # Vol targeting: scale down when portfolio ATR exceeds target (reduces DD in stressed markets)
+    if weights.sum() > 0:
+        port_atr = (weights * vol).sum()
+        target_daily = TARGET_VOL / (252 ** 0.5)
+        scale = min(1.0, target_daily / (port_atr + 1e-9))
+        weights = weights * scale
 
     return weights
