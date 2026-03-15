@@ -159,6 +159,7 @@ def get_weights(data: dict) -> pd.Series:
     atr = pd.concat([hl, hc, lc]).groupby(level=0).max()
     vol = atr.iloc[-VOL_WINDOW:].mean()
 
+
     # Log returns — natural unit for geometric/Kelly analysis
     log_rets = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
 
@@ -296,13 +297,22 @@ def get_weights(data: dict) -> pd.Series:
     # Kelly raw values span huge ranges across different asset types — normalize
     # to [-0.3, 0.6] relative to the pool median so no asset dominates
     score_df   = pd.DataFrame(scores, index=["hurst","skew","accel","kelly","crash"]).T
-    kelly_raw  = score_df["kelly"]
-    kelly_med  = kelly_raw.median()
-    kelly_std  = kelly_raw.std() + 1e-6
-    kelly_norm = ((kelly_raw - kelly_med) / kelly_std * 0.3).clip(-0.3, 0.6)
 
-    scores_s = (score_df["hurst"] + score_df["skew"]
-                + score_df["accel"] + kelly_norm + score_df["crash"])
+    # Cross-sectional normalization: each signal to [-0.3, +0.6] z-score range
+    # relative to pool median. This equalizes signal contribution so no single
+    # signal dominates due to its raw scale (Hurst raw range is ±1.6 while
+    # others are ±0.3–0.5). Applies same treatment already used for Kelly.
+    def _xsnorm(col, lo=-0.3, hi=0.6):
+        m = col.median(); s = col.std() + 1e-6
+        return ((col - m) / s * 0.3).clip(lo, hi)
+
+    hurst_norm = _xsnorm(score_df["hurst"])
+    skew_norm  = _xsnorm(score_df["skew"])
+    accel_norm = _xsnorm(score_df["accel"])
+    kelly_norm = _xsnorm(score_df["kelly"])
+    crash_norm = _xsnorm(score_df["crash"])
+
+    scores_s = hurst_norm + skew_norm + accel_norm + kelly_norm + crash_norm
 
     # ── Dynamic TOP_N: high score spread = signals agree = concentrate ────────
     # When the composite scores are tightly clustered, signals are uncertain —
