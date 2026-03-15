@@ -248,29 +248,38 @@ def run_fold(strategy_module, data: dict, train_dates, test_dates) -> pd.Series:
 
 
 def compute_metrics(returns: pd.Series) -> dict:
-    """Compute Sharpe, Sortino, Calmar, annualized return, and max drawdown."""
+    """Compute Sharpe, Sortino, Calmar, true CAGR, and max drawdown."""
     if returns.empty or returns.std() == 0:
-        return {"sharpe": 0.0, "sortino": 0.0, "calmar": 0.0, "ann_return": 0.0, "max_drawdown": 0.0}
+        return {"sharpe": 0.0, "sortino": 0.0, "calmar": 0.0,
+                "cagr": 0.0, "ann_return": 0.0, "max_drawdown": 0.0}
 
     ann_factor = 252
     sharpe     = returns.mean() / returns.std() * np.sqrt(ann_factor)
+
+    # True CAGR: geometric compounding — what you actually earn.
+    # Different from (1+mean)^252 which overstates by ignoring variance drag.
+    cum       = (1 + returns).cumprod()
+    n_years   = len(returns) / ann_factor
+    cagr      = float(cum.iloc[-1] ** (1 / n_years) - 1) if n_years > 0 else 0.0
+
+    # ann_return kept for fold-level display (uses arithmetic approx, fine for 1-yr windows)
     ann_return = (1 + returns.mean()) ** ann_factor - 1
 
-    cum = (1 + returns).cumprod()
-    roll_max = cum.cummax()
-    drawdown = (cum - roll_max) / roll_max
-    max_dd   = drawdown.min()
+    roll_max  = cum.cummax()
+    drawdown  = (cum - roll_max) / roll_max
+    max_dd    = drawdown.min()
 
-    downside = returns[returns < 0]
+    downside     = returns[returns < 0]
     downside_std = downside.std() if len(downside) > 1 else 1e-9
-    sortino = returns.mean() / downside_std * np.sqrt(ann_factor)
+    sortino      = returns.mean() / downside_std * np.sqrt(ann_factor)
 
-    calmar = (ann_return / abs(max_dd)) if max_dd != 0 else 0.0
+    calmar = (cagr / abs(max_dd)) if max_dd != 0 else 0.0
 
     return {
         "sharpe":       float(sharpe),
         "sortino":      float(sortino),
         "calmar":       float(calmar),
+        "cagr":         float(cagr * 100),
         "ann_return":   float(ann_return * 100),
         "max_drawdown": float(max_dd * 100),
     }
@@ -311,10 +320,10 @@ if __name__ == "__main__":
     elapsed = time.time() - t0
 
     print(f"\n{'='*55}")
+    print(f"oos_cagr:        {combined['cagr']:.2f}%")
     print(f"oos_sharpe:      {combined['sharpe']:.4f}")
     print(f"oos_sortino:     {combined['sortino']:.4f}")
     print(f"oos_calmar:      {combined['calmar']:.4f}")
     print(f"folds_passed:    {folds_passed}/{len(folds)}")
     print(f"max_drawdown:    {combined['max_drawdown']:.2f}%")
-    print(f"ann_return:      {combined['ann_return']:.1f}%")
     print(f"elapsed_seconds: {elapsed:.1f}")
