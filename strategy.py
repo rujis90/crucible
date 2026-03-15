@@ -19,17 +19,17 @@ import pandas as pd
 import numpy as np
 
 REBALANCE_EVERY = 21
-MA_SLOW = 200
-VOL_SHORT = 10
-VOL_LONG = 60
-VOL_SHOCK_MULT = 1.75  # tightened from 2.0
-MOM_WINDOW = 126   # 6-month
-BOND_MOM_WINDOW = 84   # 4-month (tuned from 63)
+MA_SLOW = 210
+VOL_SHORT = 7
+VOL_LONG = 110
+VOL_SHOCK_MULT = 2.0925466412638882# tightened from 2.0
+MOM_WINDOW = 126# 6-month
+BOND_MOM_WINDOW = 147# 4-month (tuned from 63)
 BOND_VOL_WINDOW = 21
 BOND_UNIVERSE = ["TLT", "IEF", "SHY"]
-VOL_ACC_SHORT = 21
-VOL_ACC_LONG = 63
-VOL_ACC_THRESHOLD = 0.85  # tuned from 0.80
+VOL_ACC_SHORT = 6
+VOL_ACC_LONG = 117
+VOL_ACC_THRESHOLD = 0.8757252204712205# tuned from 0.80
 
 
 def get_weights(data: dict) -> pd.Series:
