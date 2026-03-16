@@ -1,0 +1,32 @@
+commit	oos_sharpe	folds_passed	max_drawdown	elapsed_s	verdict	description
+b68ca0c	0.8951	17/18	-14.00	8.5	keep	non-normal architecture: Hurst+tail-ratio+acceleration+Kelly
+00355a7	0.9590	17/18	-13.10	9.7	keep	crash anti-fragility signal (5th) + adaptive score tilt range
+f88eb28	0.9687	17/18	-13.00	10.0	keep	proactive vol targeting TARGET_VOL=0.16 — two-layer risk system
+df0109f	0.9736	17/18	-12.53	10.1	keep	equal cross-sectional z-score normalization of all 5 signals
+n/a	0.9580	15/18	-13.39	10.1	discard	recalibrated concentration thresholds (0.6/0.35) — over-concentrated, lost 2 folds
+n/a	0.9734	17/18	-12.58	10.0	discard	asymmetric upward score tilt [0.6,1.6] — negligible change, max_dd slightly worse
+n/a	0.8648	15/18	-13.42	4.9	discard	REBALANCE_EVERY=42 — too infrequent, misses regime changes, lost 2 folds
+n/a	0.9675	17/18	-13.38	10.8	discard	entropy phase transition — blow-off threshold 0.45 fires too broadly in normal bull, reduces CAGR
+n/a	0.9675	17/18	-13.38	10.3	discard	bottom detection only (entropy rising + fresh_recovery → vol 0.22) — same as combined, entropy path barely fires, no benefit
+n/a	0.9700	15/18	-13.28	10.1	discard	unequal signal weights (0.5×Hurst, 1.5×accel, 1.5×crash) — lost 2 folds, equal weighting is better
+72e3f7c	0.9785	17/18	-12.65	10.4	keep	volume momentum signal (institutional accumulation/distribution) as 6th cross-sectional factor
+2ef38b7	0.9795	17/18	-12.56	12.1	keep	idiosyncratic momentum: regress out SPY beta, rank by alpha component (Simons 'regress first')
+b1a6837	0.9796	17/18	-12.54	13.1	keep	idiosyncratic 3m confirmation: beta-adjust both momentum windows (Medallion regress-first applied consistently)
+d55ecaa	0.7300	15/18	-49.37	0.7	keep	baseline: buy and hold QQQ
+6ab3dd5	0.7538	14/18	-29.91	0.7	keep	MA200 regime gate — QQQ below MA200 rotates to SHY
+af0eae3	0.8487	14/18	-29.91	0.8	keep	vol shock detection — panic to SHY when short-vol > 2x long-vol
+cb50fc2	0.9584	15/18	-19.01	0.8	keep	credit spread filter (HYG MA200) — both equity+credit must be bullish
+n/a	0.9352	17/18	-20.14	0.8	discard	adaptive bond rotation TLT/IEF/SHY by momentum — sharpe regressed despite more folds
+n/a	0.9146	14/18	-24.09	1.1	discard	top-3 equity ETFs by 6m momentum inv-vol weighted — lost folds, Sharpe regressed
+a54fadb	1.0142	16/18	-19.01	0.8	keep	absolute momentum filter (6m > 0) — go defensive if QQQ losing absolute momentum
+n/a	0.3556	12/18	-27.02	2.4	discard	idiosyncratic momentum TOP_N=1 expanded universe — sector selection diverges from QQQ
+n/a	0.7675	15/18	-18.55	0.8	discard	dual momentum (6m AND 3m > 0) — too restrictive, misses bull markets
+n/a	0.9869	16/18	-16.76	0.8	discard	vol targeting TARGET_VOL=0.16 — reduces DD but Sharpe regresses slightly
+n/a	0.9934	16/18	-18.75	0.9	discard	trailing 6m drawdown ceiling MAX_DD_CEIL=0.15 — marginal improvement, Sharpe still below best
+1e7473d	1.0200	16/18	-18.97	0.8	keep	inv-vol weighted bond rotation (TLT/IEF/SHY) when defensive — rate adaptive
+n/a	1.0200	16/18	-18.97	0.8	discard	MA50 fresh recovery re-entry — identical result, no benefit
+a3948b0	1.0524	16/18	-18.97	0.9	keep	GLD stagflation regime — credit-stress but no vol-shock → gold if positive momentum
+10d2dff	1.0619	16/18	-15.26	0.8	keep	volume accumulation confirmation — low volume momentum scales down equity exposure
+ed10149	1.1085	16/18	-15.49	0.9	keep	parameter tuning — vol_shock=1.75x, bond_mom=84d, vol_acc_threshold=0.85
+6ef0b07	1.2329	17/18	-13.22	0.9	keep	Bayesian hyperparameter optimization (300 trials, optuna TPE) — sharpe +11%
+8a1da61	1.2909	16/18	-12.40	1.0	keep	HMM regime scores (crisis_prob + entropy) as continuous equity scaler — CAGR 15.3%, Calmar 1.23
