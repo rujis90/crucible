@@ -30,6 +30,7 @@ import regime_model as rm
 SCORES_FILE = Path(__file__).parent / "regime_scores.csv"
 CACHE_FILE  = Path(__file__).parent / "data.parquet"
 SMOOTH_DAYS = 5   # days to smooth regime scores (reduces rebalance noise)
+DATA_START  = "1999-01-01"  # QQQ inception; max yfinance history
 
 
 def refresh_data() -> dict:
@@ -39,7 +40,7 @@ def refresh_data() -> dict:
     for field in ("Close", "Volume", "High", "Low"):
         df = yf.download(
             bt.UNIVERSE,
-            start=bt.START_DATE,
+            start=DATA_START,
             end="2099-12-31",
             auto_adjust=True,
             progress=False,
