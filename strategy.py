@@ -41,21 +41,21 @@ BOND_UNIVERSE   = ["TLT", "IEF", "SHY"]
 BOND_VOL_WINDOW = 21
 
 # ── Global params (Bayesian-optimized) ────────────────────────────────────────
-MA_SLOW         = 200
-VOL_SHORT       = 6
-VOL_LONG        = 40
-VOL_SHOCK_MULT  = 1.8381052479447957
-MOM_WINDOW      = 147
+MA_SLOW         = 210
+VOL_SHORT       = 7
+VOL_LONG        = 50
+VOL_SHOCK_MULT  = 1.7964540114516958
+MOM_WINDOW      = 105
 BOND_MOM_WINDOW = 105
-VOL_ACC_SHORT   = 28
-VOL_ACC_LONG    = 92
-VOL_ACC_THRESHOLD = 0.8757
+VOL_ACC_SHORT   = 35
+VOL_ACC_LONG    = 77
+VOL_ACC_THRESHOLD = 0.991949807450022
 
 # ── Regime scaling params (to be optimized) ───────────────────────────────────
-CRISIS_SCALE       = 0.07567436002888175
-ENTROPY_SCALE      = 0.32833193857162807
-ENTROPY_THRESHOLD  = 0.6232625913144604
-REGIME_FLOOR       = 0.23478476389046207
+CRISIS_SCALE       = 1.438152935885522
+ENTROPY_SCALE      = 0.18799497166314844
+ENTROPY_THRESHOLD  = 0.682460634958058
+REGIME_FLOOR       = 0.38232285186329923
 
 # ── Pre-computed regime scores ─────────────────────────────────────────────────
 _SCORES_FILE = Path(__file__).parent / "regime_scores.csv"

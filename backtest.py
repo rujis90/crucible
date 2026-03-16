@@ -86,9 +86,9 @@ UNIVERSE = [
     "IAU",   # Gold (alternative to GLD)
 ]
 
-START_DATE      = "2003-01-01"
+START_DATE      = "1999-01-01"
 END_DATE        = "2026-12-31"
-N_FOLDS         = 18           # walk-forward folds (2008-2025)
+N_FOLDS         = 22           # walk-forward folds (2004-2025)
 TRAIN_YEARS     = 5
 TEST_YEARS      = 1
 STEP_YEARS      = 1
