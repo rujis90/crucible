@@ -1,93 +1,160 @@
-# Crucible-NDX — Research Program
+# Crucible — Research Program
 
 ## System
 
-You are a quant researcher running signal experiments on NDX single-stock strategies.
+You are a quant researcher running signal experiments on the Nasdaq-100 universe.
 
 **Fixed infrastructure** (`backtest.py`, `labels.py`, `features.py`, `cv.py`) — do not modify.
 **You edit** `strategy.py` only.
 
-Read `CLAUDE.md` before every session. It defines the methodology you must follow.
+Read `CLAUDE.md` before every session — it defines the methodology and anti-patterns.
+Check `examples/` to see what has already been tried and what worked.
 
 ---
 
 ## Objective
 
-Maximize `oos_sharpe / oos_sharpe_std` (mean Sharpe across CPCV paths, divided by its standard deviation).
+Maximize `oos_sharpe / oos_sharpe_std` across 15 CPCV paths.
 
-A strategy with Sharpe 0.8 ± 0.1 across 15 paths is the target. Not Sharpe 1.1 ± 0.6.
+**A strategy with Sharpe 0.80 ± 0.10 is worth more than one at 1.10 ± 0.60.**
+The std tells you how regime-dependent the signal is. Low std = robust edge.
 
-**Hard constraints:**
-- `max_drawdown` worse than -35%: discard
-- `oos_sharpe_std > 0.5`: discard (too regime-dependent)
-- `elapsed_seconds > 600`: discard (too slow for the research loop)
+**Hard constraints — discard if ANY violated:**
+- `max_drawdown` worse than -35%
+- `oos_sharpe_std > 0.5`
+- `elapsed_seconds > 600`
+
+---
+
+## The mental model: LdP meets Qullamaggie
+
+Two frameworks guide what to look for. They are complementary, not competing.
+
+**López de Prado (AFML)** defines *how* to test ideas without lying to yourself:
+- Triple barrier labels — the label reflects what actually happens (barrier hit first), not a fixed horizon return
+- CPCV — you get a Sharpe *distribution*, not a single lucky number
+- Purging + embargo — no test-period information leaks into training
+- CS z-scoring — features are comparable across time, no distribution shift
+
+**Qullamaggie (Kristoffer Carlsson)** defines *what* to look for:
+- Stocks in Stage 2 uptrends — above their moving averages, making higher highs
+- Relative strength leaders — outperforming the NDX universe for weeks, not just days
+- Volume-confirmed breakouts — price expansion on above-average volume signals conviction
+- Tight bases before moves — low recent vol (VCP) precedes explosive breakouts
+- Cut losses fast, let winners run — triple barriers with PT > SL ratio mirrors this
+
+The research loop connects these: Qullamaggie's pattern recognition becomes a feature
+filter in `get_signals()`. LdP's framework tests whether the pattern actually predicts
+the triple-barrier outcome out-of-sample across multiple market regimes.
 
 ---
 
 ## Current baseline
 
-The default `strategy.py` is cross-sectional momentum (top-10 by `ret_21d`). This is your floor. Every experiment must beat this on `oos_sharpe / oos_sharpe_std`.
+`strategy.py` = cross-sectional momentum top-10 by `ret_21d`. Equal weight.
+No filters, no ML.
+
+**Baseline results (full CPCV):**
+```
+oos_sharpe:     0.41
+oos_sharpe_std: 0.26
+quality:        1.57
+max_drawdown:   -37.5%
+cagr:           6.9%
+```
+
+Every experiment must beat `quality > 1.57` with `std < 0.50` and `dd > -35%`.
+See `examples/` for experiments already run.
 
 ---
 
 ## Search space
 
-### Signal ideas (ranked by economic rationale)
+### Tier 1 — Strong economic basis, test first
 
-**Tier 1 — Strong economic basis:**
-- `rs_rank` filtering: only enter tickers in top quintile of 63-day RS rank. Entry quality filter.
-- `vol_ratio` regime gate: suppress signals when `vol_ratio > 0.5` (vol expanding = uncertainty). Risk-off filter.
-- ML ranking: train a gradient boosting classifier on `(ret_21d, rs_rank, vol_ratio, macd_cs)` → predict `bin` label. Use signal probability as position size.
-- `dv_rank` filter: exclude tickers below 25th percentile of dollar volume (illiquidity cost).
+**RS rank quality filter** (`rs_rank`)
+- Qullamaggie analogue: only trade stocks already in Stage 2 (extended uptrend)
+- Only enter tickers in top 40-60% of 63-day relative strength rank
+- Tested: `examples/strategy_rs_rank_filter.py` → quality 1.89, sharpe 0.58 ✓
 
-**Tier 2 — Plausible, test carefully:**
-- Combine momentum (`ret_21d`) and mean-reversion (`ret_1d`): go long stocks with high 21d momentum but mild 1d pullback.
-- `px_pos_52w` breakout filter: only enter when `px_pos_52w > 0.7` (near 52w high = strength).
-- `vol_momentum` confirmation: require positive volume momentum for entry (participation confirms price).
-- PT_SL tuning: vary profit target vs stop loss ratio. Asymmetric barriers (PT > SL) bias toward small wins; symmetric or inverted biases toward avoiding large losses.
+**Vol ratio regime gate** (`vol_ratio`)
+- Qullamaggie analogue: don't trade choppy tape — wait for clear trend
+- `vol_ratio = log(vol_21d / vol_63d)`. When positive and high: vol expanding = uncertainty
+- Go flat (zero weights) when cross-sectional median `vol_ratio > threshold`
+- Hypothesis: tightens Sharpe distribution by avoiding crisis/reversal periods
 
-**Tier 3 — Interesting but complex:**
-- Meta-labeling: use a secondary classifier to predict whether the primary signal will be correct (not just direction, but bet size).
-- Regime conditioning: detect bull/bear from NDX 200d MA, suppress all signals in bear.
-- Position sizing by signal confidence: weight positions by predicted probability, not equal weight.
+**Dollar volume liquidity filter** (`dv_rank`)
+- Only enter tickers above 25th percentile of rolling dollar volume
+- Prevents entering illiquid names where slippage dominates any signal
 
-### Parameters to explore
+**52-week high breakout filter** (`px_pos_52w`)
+- Qullamaggie analogue: buy breakouts to new highs, not value names
+- Only enter when `px_pos_52w > 0.75` (price in top 25% of its 52-week range)
+- Hypothesis: tickers near 52-week highs have stronger follow-through momentum
 
-```python
-REBALANCE_EVERY  ∈ [1, 5, 10, 21]   # daily, weekly, biweekly, monthly
-PT_SL[0]         ∈ [1.0, 1.5, 2.0, 2.5]  # profit target multiplier
-PT_SL[1]         ∈ [0.5, 1.0, 1.5]   # stop loss multiplier
-MAX_HOLD         ∈ [10, 20, 30]       # vertical barrier
-TOP_N            ∈ [5, 10, 15, 20]    # position count
-```
+### Tier 2 — Plausible, test carefully
+
+**Momentum + mild pullback** (`ret_21d` high, `ret_1d` slightly negative)
+- Qullamaggie analogue: buy the first pullback in a strong uptrend
+- Filter for tickers with high 21d momentum but `ret_1d` slightly below median
+- Hypothesis: enters after minor consolidation, better entry timing
+
+**Volume momentum confirmation** (`vol_momentum`)
+- Only enter when `vol_momentum > 0` (recent volume above historical average)
+- Qullamaggie analogue: volume expansion confirms institutional participation
+
+**Barrier ratio tuning** (`PT_SL`)
+- Current: PT=1.5×vol, SL=1.0×vol
+- Try: PT=2.0, SL=0.75 (asymmetric — bigger winners, tighter stops)
+- Hypothesis: matches Qullamaggie's cut fast / let run philosophy
+
+**Top N count** (`top_n`)
+- Try 5 or 15 instead of 10
+- 5 = concentrated, higher vol but potentially better alpha quality
+- 15 = diversified, lower vol but alpha may dilute
+
+### Tier 3 — Interesting but complex
+
+**ML ranking** — train a gradient boosting classifier on CPCV train folds
+- Features: `(ret_21d, rs_rank, vol_ratio, px_pos_52w, dv_rank)`
+- Label: `bin` (upper barrier = +1, lower/time = 0)
+- Use predicted probability as signal strength instead of equal weight
+- Caution: training on each fold with no leakage adds significant runtime
+
+**200-day MA regime filter** (requires NDX index close)
+- Go flat on all signals when NDX is below its 200-day moving average
+- Hard binary regime: Bull (above MA) = trade, Bear (below) = cash
+- Qullamaggie: "I don't trade bear markets"
+
+**Signal-proportional sizing**
+- Weight positions by model probability or RS rank score rather than equal weight
+- Tickers with highest conviction get more size
 
 ---
 
-## Guiding principles (LdP + Spitznagel synthesis)
+## Experiment protocol
 
-1. **Economic rationale first.** Before coding, articulate: *what market inefficiency or structural effect does this exploit?* If you can't answer this, don't run the experiment.
-
-2. **One change at a time.** Small, isolatable changes. If the experiment fails, you know why.
-
-3. **The 2022 test.** Any real strategy must handle the 2022 rate-shock bear market. If it only works in 2013-2021 bull runs, it's not a strategy — it's a bull market rider.
-
-4. **Simplicity is alpha.** A strategy that adds 5 features and gains 0.1 Sharpe is worse than one that removes 3 features and keeps the same Sharpe. Robustness > peak performance.
-
-5. **Transaction costs are not optional.** Commission 3 bps + vol-adjusted slippage are built in. A high-frequency signal that trades daily must clear a much higher bar than a monthly rebalancer.
-
-6. **CPCV variance is information.** High `oos_sharpe_std` means the strategy is regime-sensitive. Investigate which paths fail — they reveal the conditions under which your signal breaks down.
-
-7. **Don't mistake vol targeting for alpha.** Reducing volatility improves Sharpe arithmetically. If your improvement comes entirely from holding less (lower position count, higher cash), it's not signal alpha.
+1. Read `results.tsv` — understand what's been tried and the quality trajectory
+2. Read `examples/` — see actual code from past experiments
+3. Form ONE hypothesis with a one-sentence economic rationale
+4. Edit `strategy.py` — one change only
+5. Run fast first: set `USE_CPCV = False`, run `python backtest.py` (~60s)
+6. If fast result looks promising (sharpe > 0.5): switch `USE_CPCV = True`, re-run (~5 min)
+7. If `quality > current_best`: commit + append keep row to `results.tsv`
+8. Else: `git checkout -- strategy.py`, append discard row
 
 ---
 
-## Results format
+## Guiding principles
 
-`results.tsv` — append only:
-```
-<commit>  <oos_sharpe>  <oos_sharpe_std>  <folds_passed>  <max_drawdown>  <elapsed_s>  <keep/discard>  <description>
-```
+1. **Economic rationale first.** Can you explain in one sentence *why* this predicts the triple-barrier outcome? "It worked in the data" is not a rationale.
 
-Git protocol:
-- Keep: `git add strategy.py && git commit -m "keep: <description> oos_sharpe=X std=Y"`
-- Discard: `git checkout -- strategy.py`
+2. **One change at a time.** If an experiment combines three ideas and improves, you don't know which one caused it.
+
+3. **The 2022 test.** Check which CPCV paths are failing. Paths covering 2022 (rate-shock bear) reveal regime sensitivity. A real edge works there too.
+
+4. **Simplicity is alpha.** A smaller Sharpe gain from *removing* a parameter beats a bigger gain from adding three. Complexity = fragility.
+
+5. **Std is the real signal.** Tightening `oos_sharpe_std` while holding Sharpe flat is progress. It means the signal is working consistently, not just getting lucky in bull-market paths.
+
+6. **Qullamaggie's mantra in quant form:** You don't need to trade every day. Going flat (zero weights) on days when conditions aren't right is a valid and often superior position. The regime gate is not a constraint — it's an edge.

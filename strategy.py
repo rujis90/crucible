@@ -1,33 +1,33 @@
 """
-strategy.py — AGENT EDITABLE. Modify freely.
+strategy.py — the only file you modify.
 
-Interface contract (do not rename these):
-  REBALANCE_EVERY : int   — calendar days between portfolio rebalances
+Interface (do not rename):
+  REBALANCE_EVERY : int   — trading days between rebalances
   PT_SL           : list  — [profit_target_mult, stop_loss_mult] in daily vol units
-  MAX_HOLD        : int   — triple barrier vertical limit in trading days
-  USE_CPCV        : bool  — True = full CPCV, False = fast walk-forward
+  MAX_HOLD        : int   — vertical barrier in trading days
+  USE_CPCV        : bool  — True = full CPCV (15 paths), False = fast walk-forward
   get_signals(train_features, train_labels, test_features) → dict[date, Series]
 
-The agent edits the signal logic inside get_signals().
-backtest.py handles universe construction, label generation, and execution.
-
 ─────────────────────────────────────────────────────────────────────────────
-Baseline strategy: rank tickers by 21-day momentum (ret_21d feature),
-go long the top 10 within the NDX PIT universe.
+Baseline: cross-sectional momentum top-10.
 
-No ML, no fitting — pure cross-sectional momentum signal.
-Use this as a starting benchmark. It should be easy to beat.
+Ranks every NDX-universe ticker by 21-day return (CS z-scored), goes long the
+top 10 with equal weight. No ML, no fitting.
+
+This is the floor — every experiment must beat this on oos_sharpe / oos_sharpe_std.
+See program.md for the full search space and guiding principles.
+See examples/ for strategies that have already been tested.
 ─────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
 import pandas as pd
 
-# ── Parameters ────────────────────────────────────────────────────────────────
-REBALANCE_EVERY = 5       # trading days between rebalances
-PT_SL           = [1.5, 1.0]  # profit target = 1.5× daily vol, stop = 1.0×
-MAX_HOLD        = 20      # vertical barrier: close position after 20 days max
-USE_CPCV        = True    # set False for fast walk-forward iteration
+# ── Parameters (tune these too) ───────────────────────────────────────────────
+REBALANCE_EVERY = 5         # weekly rebalance
+PT_SL           = [1.5, 1.0]  # profit target 1.5×vol, stop 1.0×vol
+MAX_HOLD        = 20        # close after 20 trading days if neither barrier hit
+USE_CPCV        = True      # set False for fast iteration, True before keeping
 
 
 def get_signals(
@@ -36,21 +36,20 @@ def get_signals(
     test_features: pd.DataFrame,
 ) -> dict[pd.Timestamp, pd.Series]:
     """
-    Generate trading signals for each test event date.
+    Return signals for each test date.
 
     Args:
-        train_features: DataFrame indexed by (date, ticker), columns = feature names
-        train_labels:   Series indexed by (date, ticker), values = {-1, 0, 1}
-        test_features:  same structure as train_features, but for test dates
+        train_features  — (date, ticker) MultiIndex, columns = feature names
+        train_labels    — (date, ticker) MultiIndex, values ∈ {-1, 0, +1}
+        test_features   — same structure, no labels
 
     Returns:
-        dict mapping each test date → Series {ticker: signal_strength}
-        signal_strength in [0, 1]: 0 = no position, 1 = full weight
-        backtest.py normalises weights to respect MAX_POSITION and GROSS_LIMIT
+        dict: test_date → Series{ticker: signal_strength ∈ [0, 1]}
+        0 = no position, 1 = maximum weight
+        backtest.py caps each position at MAX_POSITION and normalises gross to 1.
     """
     signals_by_date: dict[pd.Timestamp, pd.Series] = {}
 
-    # Get unique test dates
     if isinstance(test_features.index, pd.MultiIndex):
         test_dates = test_features.index.get_level_values("t0").unique()
     else:
@@ -58,30 +57,26 @@ def get_signals(
 
     for date in test_dates:
         try:
-            if isinstance(test_features.index, pd.MultiIndex):
-                snapshot = test_features.xs(date, level="t0")
-            else:
-                snapshot = test_features.loc[[date]]
+            snapshot = (
+                test_features.xs(date, level="t0")
+                if isinstance(test_features.index, pd.MultiIndex)
+                else test_features.loc[[date]]
+            )
 
             if snapshot.empty or "ret_21d" not in snapshot.columns:
                 signals_by_date[date] = pd.Series(dtype=float)
                 continue
 
-            # Rank by 21-day relative strength within the NDX PIT universe.
-            # Higher ret_21d = stronger momentum = higher signal.
             momentum = snapshot["ret_21d"].dropna()
             if momentum.empty:
                 signals_by_date[date] = pd.Series(dtype=float)
                 continue
 
-            # Long top 10 by momentum rank
             top_n = 10
             top_tickers = momentum.nlargest(top_n)
 
-            # Equal weight among top-N
             signals = pd.Series(0.0, index=momentum.index)
             signals[top_tickers.index] = 1.0 / top_n
-
             signals_by_date[date] = signals
 
         except Exception:

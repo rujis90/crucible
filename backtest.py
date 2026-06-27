@@ -376,18 +376,22 @@ if __name__ == "__main__":
         if not fold_ret.empty:
             path_returns[path_id] = fold_ret
 
-    all_rets = pd.concat(list(path_returns.values())).sort_index() if path_returns else pd.Series(dtype=float)
-    combined = compute_metrics(all_rets)
-    sharpe_dist = [compute_metrics(r)["sharpe"] for r in path_returns.values()]
-    sharpe_std  = float(np.std(sharpe_dist)) if sharpe_dist else 0.0
+    path_metrics   = {pid: compute_metrics(r) for pid, r in path_returns.items()}
+    sharpe_dist    = [m["sharpe"] for m in path_metrics.values()]
+    oos_sharpe     = float(np.mean(sharpe_dist)) if sharpe_dist else 0.0
+    sharpe_std     = float(np.std(sharpe_dist))  if sharpe_dist else 0.0
+    cagr_dist      = [m["cagr"] for m in path_metrics.values()]
+    oos_cagr       = float(np.mean(cagr_dist))   if cagr_dist  else 0.0
+    # worst drawdown across paths — the correct metric for CPCV
+    worst_dd       = min((m["max_drawdown"] for m in path_metrics.values()), default=0.0)
 
     elapsed = time.time() - t0_wall
 
     print(f"\n{'='*55}")
-    print(f"oos_cagr:        {combined['cagr']:.2f}%")
-    print(f"oos_sharpe:      {combined['sharpe']:.4f}")
+    print(f"oos_cagr:        {oos_cagr:.2f}%")
+    print(f"oos_sharpe:      {oos_sharpe:.4f}")
     print(f"oos_sharpe_std:  {sharpe_std:.4f}")
     print(f"cpcv_paths:      {len(path_returns)}")
     print(f"folds_passed:    {folds_passed}/{len(splits)}")
-    print(f"max_drawdown:    {combined['max_drawdown']:.2f}%")
+    print(f"max_drawdown:    {worst_dd:.2f}%")
     print(f"elapsed_seconds: {elapsed:.1f}")

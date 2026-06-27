@@ -1,4 +1,5 @@
 data.parquet
+data/*.parquet
 run.log
 __pycache__/
 *.pyc
