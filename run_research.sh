@@ -1,34 +1,22 @@
-#!/bin/bash
-# run_research.sh — runs the Crucible loop as stateless 3-experiment batches
-# Each batch is a fresh Claude invocation — no context accumulation
-# Usage: bash run_research.sh [num_batches]
+#!/usr/bin/env bash
+# run_research.sh — autonomous strategy research loop
+# Usage: bash run_research.sh [N_BATCHES]
+# Each batch = 3 experiments via Claude Code. Default: 10 batches = 30 experiments.
 
-cd "$(dirname "$0")"
+set -e
 
-BATCHES=${1:-20}   # default 20 batches = 60 experiments
-
-echo "╔══════════════════════════════════════════════╗"
-echo "║  CRUCIBLE — Autonomous Strategy Research     ║"
-echo "╚══════════════════════════════════════════════╝"
-echo ""
-echo "Batches:     $BATCHES × 3 experiments = up to $((BATCHES * 3)) experiments"
-echo "Working dir: $(pwd)"
-echo "Current best: $(grep 'keep' results.tsv 2>/dev/null | tail -1 || echo 'none yet')"
+N=${1:-10}
+echo "Starting $N research batches (3 experiments each = $((N * 3)) total)"
+echo "Log: run.log  |  Experiments: results.tsv  |  Progress: git log"
 echo ""
 
-for i in $(seq 1 $BATCHES); do
-    echo "════════════════════════════════════════"
-    echo "  BATCH $i / $BATCHES  ($(date '+%H:%M:%S'))"
-    echo "════════════════════════════════════════"
-
-    unset CLAUDECODE && claude --dangerously-skip-permissions --print "$(cat research_step.md)"
-
-    echo ""
-    echo "Batch $i done. Current best: $(grep 'keep' results.tsv 2>/dev/null | tail -1 || echo 'none yet')"
+for i in $(seq 1 $N); do
+    echo "══════════════════════════════════════════"
+    echo "  Batch $i / $N"
+    echo "══════════════════════════════════════════"
+    claude --print --dangerously-skip-permissions "$(cat research_step.md)"
     echo ""
 done
 
-echo "All batches complete."
-echo ""
-echo "Final results:"
-cat results.tsv
+echo "Research complete. $((N * 3)) experiments run."
+echo "Review: cat results.tsv | sort -t$'\t' -k2 -rn | head -10"
