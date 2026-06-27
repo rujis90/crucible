@@ -50,7 +50,7 @@ cd crucible
 pip install -e .
 
 # 2. Get the dataset
-# Buy at https://ndxpit.com — $20 one-time, instant download
+# Buy at https://crucible-research.com — $20 one-time, instant download
 # Then copy the parquet files:
 cp ~/downloads/ndx-pit-data/*.parquet data/
 
@@ -116,7 +116,7 @@ This is the core difference from standard research: the agent can't report one g
 
 ## The dataset
 
-The `data/` directory needs two files you get from [ndxpit.com](https://ndxpit.com):
+The `data/` directory needs two files you get from [crucible-research.com](https://crucible-research.com):
 
 | File | Size | Contents |
 |---|---|---|
@@ -143,8 +143,8 @@ research_step.md      — per-batch agent instructions
 run_research.sh       — autonomous batch runner
 results.tsv           — experiment log (append-only)
 data/
-  ndx_ohlcv.parquet        ← buy at ndxpit.com
-  ndx_pit_daily.parquet    ← buy at ndxpit.com
+  ndx_ohlcv.parquet        ← buy at crucible-research.com
+  ndx_pit_daily.parquet    ← buy at crucible-research.com
   README.md
 ```
 

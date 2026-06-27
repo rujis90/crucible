@@ -19,7 +19,7 @@ MISSING_TICKERS.txt         — tickers with no available price data
 
 ## Where to get the data
 
-Buy the NDX PIT dataset at [ndxpit.com](https://ndxpit.com) — $20 one-time, instant download.
+Buy the NDX PIT dataset at [crucible-research.com](https://crucible-research.com) — $20 one-time, instant download.
 
 The dataset ships as a ZIP containing all files above plus 6 CLAUDE.md skill files.
 After downloading:
