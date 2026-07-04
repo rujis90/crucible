@@ -35,7 +35,7 @@ Crucible fixes all three ways backtests lie:
 - **`cv.py`** — combinatorial purged CV with embargo. **Never modify.**
 - **`strategy.py`** — the single file the agent edits. Signal selection logic and label-driven parameters. **This is the research surface.**
 
-Each experiment takes 1–10 minutes (walk-forward fast mode / full CPCV). The metric is **`oos_sharpe / oos_sharpe_std`** — mean Sharpe across all 15 combinatorial OOS splits divided by its standard deviation. A robust strategy with Sharpe 0.80 ± 0.08 beats a fragile one at 1.1 ± 0.6.
+Each experiment takes several minutes (fast walk-forward mode) to roughly 5–10 minutes (full CPCV), depending on hardware. The metric is **`oos_sharpe / oos_sharpe_std`** — mean Sharpe across all 15 combinatorial OOS splits divided by its standard deviation. A robust strategy with Sharpe 0.80 ± 0.08 beats a fragile one at 1.1 ± 0.6.
 
 ---
 
@@ -57,22 +57,38 @@ cp ~/downloads/ndx-pit-data/*.parquet data/
 # 3. Optionally merge skill files into CLAUDE.md
 cat ~/downloads/ndx-pit-data/skills/SKILL_*.md >> CLAUDE.md
 
-# 4. Verify setup (~30s, fast walk-forward mode)
+# 4. Verify setup (full CPCV; usually 5-10 min locally)
 python backtest.py
 ```
 
 Expected output:
 ```
-Loading NDX PIT dataset...
-  ohlcv : 4,900 days × 210 tickers
-  pit   : 4,900 days × 265 tickers
+Loading data …
+Universe: 101 current NDX members  | 265 historical  | 2010-01-04 → 2026-06-25
+Building labels (pt=1.5×vol, sl=1.0×vol, hold=20d) …
+Labels: 203 tickers, 4094 total events
+Building feature cache …
+Features: 4019 date snapshots
+Running CPCV (N=6, K=2, embargo=21d) …
+  path 00: sharpe=+...  dd=...%  signals=...  hit=...%  ✓
+  ...
 
-oos_sharpe:      0.71
-oos_sharpe_std:  0.14
+=======================================================
+oos_cagr:        ...
+oos_sharpe:      ...
+oos_sharpe_std:  ...
 cpcv_paths:      15
-folds_passed:    12/15
-max_drawdown:    -23.1%
-elapsed_seconds: 44.2
+folds_passed:    ...
+max_drawdown:    ...
+num_signals:     ...
+upper_hit_rate:  ...
+avg_signal_ret:  ...
+median_signal_ret: ...
+profit_factor:   ...
+avg_holding_days: ...
+signal_frequency: ...
+hit_rate_std:    ...
+elapsed_seconds: ...
 ```
 
 ---
@@ -109,11 +125,21 @@ oos_sharpe:      0.79    ← mean Sharpe across all CPCV paths
 oos_sharpe_std:  0.09    ← distribution tightness — the real signal
 cpcv_paths:      15      ← C(6,2) paths from 6 time blocks
 folds_passed:    13/15
+num_signals:     1240    ← accepted signal events across CV splits
+upper_hit_rate:  0.47    ← fraction hitting the upper barrier first
+avg_signal_ret:  0.0031  ← mean triple-barrier signal return after costs
+profit_factor:   1.12    ← gross signal gains / gross signal losses
+hit_rate_std:    0.04    ← path-to-path hit-rate stability
 ```
 
-**The agent keeps a strategy only if `oos_sharpe / oos_sharpe_std` improves AND no constraint is violated:**
+**The agent keeps a strategy only if signal quality and `oos_sharpe / oos_sharpe_std` improve AND no constraint is violated:**
 - `max_drawdown` worse than -35%: discard
 - `oos_sharpe_std > 0.5`: discard (too regime-dependent)
+- `num_signals < 100`: discard (too sparse)
+- `upper_hit_rate < 0.45`: discard (not enough upper-barrier hits)
+- `avg_signal_ret <= 0`: discard (no net edge after costs)
+- `profit_factor < 1.05`: discard (losses overwhelm gains)
+- `hit_rate_std > 0.10`: discard (label edge unstable across paths)
 
 This is the core difference from standard research: the agent can't report one good path and call it done. It has to improve the entire distribution across 15 independent OOS windows.
 
@@ -128,7 +154,7 @@ The `data/` directory needs two files you get from [crucible-research.com](https
 | `ndx_ohlcv.parquet` | 31 MB | OHLCV for 210 NDX tickers, 2007–present |
 | `ndx_pit_daily.parquet` | 165 KB | Boolean membership: was ticker in NDX on each date? |
 
-The purchase also includes 6 CLAUDE.md skill files covering the full methodology (PIT filtering, triple barrier labels, CPCV, feature engineering, position sizing, regime detection). Append them to `CLAUDE.md` and Claude understands the framework immediately.
+The purchase also includes 7 CLAUDE.md skill files covering the full methodology (PIT filtering, triple barrier labels, CPCV, feature engineering, position sizing, regime detection, and strategy research). Append them to `CLAUDE.md` and Claude understands the framework immediately.
 
 **Why not just use yfinance?** `yf.download(ndx_100_today)` uses today's survivors. The PIT dataset tracks all 265 historical NDX members with exact inclusion dates. That 208 bps/yr gap is the difference between testing a hypothesis and measuring luck.
 
@@ -163,7 +189,7 @@ data/
 
 **Purging + embargo prevents leakage.** A 20-day label that starts near a test window doesn't resolve until the test period has started. Purging removes those training samples. Embargo adds a gap equal to the longest feature lookback. Both are required — either alone is not enough.
 
-**T+1 execution.** Signals compute at day t close, execute at day t+1 open, earn t+1→t+2. No trading at the signal close.
+**Triple-barrier signal exits.** Signals are dated ticker events. Once fired, a signal exits when the precomputed triple-barrier box resolves: profit target, stop loss, or max holding time. There is no portfolio rebalance schedule, max-stock cap, or gross exposure target.
 
 **Stateless batches.** Each Claude invocation reads current state from files, not memory. This prevents context bloat and keeps experiments reproducible.
 

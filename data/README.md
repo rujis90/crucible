@@ -21,15 +21,16 @@ MISSING_TICKERS.txt         — tickers with no available price data
 
 Buy the NDX PIT dataset at [crucible-research.com](https://crucible-research.com) — $20 one-time, instant download.
 
-The dataset ships as a ZIP containing all files above plus 6 CLAUDE.md skill files.
+The dataset ships as a ZIP containing the required parquet files, optional
+diagnostic files, and 7 CLAUDE.md skill files.
 After downloading:
 
 ```bash
-unzip ndx-pit-dataset.zip -d ~/downloads/ndx-pit-data/
-cp ~/downloads/ndx-pit-data/*.parquet crucible/data/
+unzip ndx-pit-dataset.zip
+cp ndx-pit-dataset/*.parquet crucible/data/
 
 # Optional: merge skills into CLAUDE.md
-cat ~/downloads/ndx-pit-data/skills/SKILL_*.md >> crucible/CLAUDE.md
+cat ndx-pit-dataset/skills/SKILL_*.md >> crucible/CLAUDE.md
 ```
 
 ## Why can't I just download this myself?

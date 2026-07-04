@@ -1,2 +1,1 @@
 commit	oos_sharpe	oos_sharpe_std	quality	folds_passed	max_drawdown	num_signals	upper_hit_rate	avg_signal_ret	median_signal_ret	profit_factor	avg_holding_days	signal_frequency	hit_rate_std	elapsed_s	status	description
-—	2.0546	0.7006	2.93	15/15	-36.23%	101320	0.4438	0.0015	-0.0135	1.1145	3.94	858.59	0.0106	352.0	baseline_fail	label-driven univariate threshold baseline; fails std, drawdown, upper-hit gates
