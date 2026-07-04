@@ -29,7 +29,7 @@ You are a quant researcher working on a survivorship-bias-free Nasdaq-100 stock 
 ## Architecture you must respect
 
 ### Files you edit
-- `strategy.py` — only this file. Contains signal logic and parameters.
+- `strategy.py` — only this file. Contains signal selection logic and label-driven parameters.
 
 ### Files you never modify
 - `backtest.py` — infrastructure
@@ -79,15 +79,20 @@ All features are cross-sectionally z-scored (mean 0, std 1 within the NDX univer
 # train_labels: pd.Series
 #   index = MultiIndex (date, ticker)
 #   values: +1 (upper barrier hit), -1 (lower barrier hit), 0 (time expired)
+#   these are the target labels for learning whether a signal is worth taking
 
 # test_features: pd.DataFrame
 #   same structure as train_features, but for test dates
 #   NO LABELS — these are what you predict
 
-# Return: dict mapping test_date → pd.Series {ticker: signal_strength}
-#   signal_strength ∈ [0, 1]
-#   0 = no position, 1 = maximum position
-#   backtest.py clips to MAX_POSITION (10%) and normalises to GROSS_LIMIT (1.0)
+# Return: dict mapping test_date → pd.Series {ticker: signal}
+#   signal > 0 = open an independent long signal for that ticker/date
+#   signal <= 0 or missing = no signal
+#   no top-N cap, max-stock cap, gross limit, or periodic rebalance is applied
+#
+# Exit rule:
+#   each signal exits at the first triple-barrier touch:
+#   profit target, stop loss, or vertical time barrier.
 ```
 
 ---
@@ -95,7 +100,6 @@ All features are cross-sectionally z-scored (mean 0, std 1 within the NDX univer
 ## Parameters you can set in strategy.py
 
 ```python
-REBALANCE_EVERY = 5       # trading days between rebalances
 PT_SL           = [1.5, 1.0]  # [profit_target_vol_mult, stop_loss_vol_mult]
 MAX_HOLD        = 20      # vertical barrier in trading days
 USE_CPCV        = True    # False = faster walk-forward for iteration
@@ -114,14 +118,31 @@ The backtest prints:
 oos_sharpe:      0.74    ← mean Sharpe across all CPCV paths
 oos_sharpe_std:  0.18    ← standard deviation across paths
 cpcv_paths:      15      ← C(6,2) = 15 paths evaluated
+num_signals:     1240    ← accepted signal events across CV splits
+upper_hit_rate:  0.47    ← fraction hitting the upper barrier first
+avg_signal_ret:  0.0031  ← mean triple-barrier signal return after costs
+profit_factor:   1.12    ← gross signal gains / gross signal losses
+hit_rate_std:    0.04    ← path-to-path hit-rate stability
 ```
 
 **Interpreting the results:**
 - `oos_sharpe` alone is not enough. A strategy with Sharpe 0.9 ± 0.5 is less trustworthy than one with 0.75 ± 0.08.
 - `oos_sharpe_std > 0.3` = high variance. Strategy is regime-dependent. Investigate which paths failed.
 - `folds_passed / total` below 70% = strategy is inconsistent. Likely overfit to specific years.
+- `upper_hit_rate` must improve the chance of hitting the profit barrier. If it does not, the signal is not learning the label.
+- `avg_signal_ret`, `median_signal_ret`, and `profit_factor` tell you whether the signal edge survives costs.
+- `hit_rate_std` tells you whether the label edge is stable across regimes.
 
-**Do not optimize for `oos_sharpe` alone. Optimize for `oos_sharpe / oos_sharpe_std`.**
+**Do not optimize for `oos_sharpe` alone. Optimize signal quality first, then `oos_sharpe / oos_sharpe_std`.**
+
+Hard discard rules:
+- `max_drawdown` worse than -35%
+- `oos_sharpe_std > 0.5`
+- `num_signals < 100`
+- `upper_hit_rate < 0.45`
+- `avg_signal_ret <= 0`
+- `profit_factor < 1.05`
+- `hit_rate_std > 0.10`
 
 ---
 
@@ -135,7 +156,7 @@ Before proposing any new feature or signal, answer:
 
 3. **Correlated with existing features?** Adding a correlated feature doesn't add information but does add noise and overfitting risk.
 
-4. **Transaction cost drag:** Does the signal turn over fast enough to generate costs that eat the alpha?
+4. **Signal frequency / cost drag:** Does the signal fire so often that round-trip costs eat the alpha?
 
 5. **Regime sensitivity:** Does the feature work in both bull and bear markets, or only one?
 
@@ -156,11 +177,11 @@ Before proposing any new feature or signal, answer:
 ## Experiment protocol
 
 1. Read `results.tsv` — understand what's been tried
-2. Form a hypothesis with an economic rationale
+2. Form a hypothesis with an economic rationale tied to the triple-barrier label
 3. Change ONE thing in `strategy.py`
 4. Run `python backtest.py`
-5. If `oos_sharpe` improves AND `oos_sharpe_std` doesn't increase: `git add strategy.py && git commit`
+5. Keep only if signal metrics pass hard gates AND `quality = oos_sharpe / oos_sharpe_std` improves
 6. Log to `results.tsv`
 7. If not: `git checkout -- strategy.py`, log discard
 
-The goal is not the highest Sharpe. The goal is the most robust signal with the smallest variance across CPCV paths.
+The goal is not the highest Sharpe. The goal is the most robust signal rule with the smallest variance across CPCV paths.

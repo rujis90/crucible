@@ -1,15 +1,15 @@
 """
 backtest.py — FIXED INFRASTRUCTURE. Do not modify.
 
-Walk-forward + CPCV backtester for NDX single-stock strategies.
+Walk-forward + CPCV backtester for NDX single-stock signals.
 Requires the NDX PIT dataset in data/ (buy at [website]).
 
 Key differences from original Crucible:
   - Universe:  NDX PIT dataset (point-in-time, survivorship-bias-free)
   - Labels:    triple barrier (not raw returns)
   - Validation: CPCV paths (not single walk-forward)
-  - Input to strategy: feature matrix, not raw OHLCV
-  - T+1 execution preserved
+  - Input to strategy: feature matrix + purged triple-barrier labels
+  - Execution: signals enter, then exit at their triple-barrier touch
 
 Metrics (grep-friendly):
   oos_sharpe:      <float>   — mean Sharpe across CPCV paths
@@ -17,6 +17,14 @@ Metrics (grep-friendly):
   cpcv_paths:      <int>     — number of paths evaluated
   folds_passed:    <int>/<int>
   max_drawdown:    <float>%
+  num_signals:     <int>
+  upper_hit_rate:  <float>
+  avg_signal_ret:  <float>
+  median_signal_ret:<float>
+  profit_factor:   <float>
+  avg_holding_days:<float>
+  signal_frequency:<float>   — signals per year
+  hit_rate_std:    <float>   — std of upper hit rate across paths
   elapsed_seconds: <float>
 """
 
@@ -28,7 +36,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cv import cpcv_splits, walk_forward_splits, cpcv_metrics
+from cv import cpcv_splits, walk_forward_splits
 from features import make_features
 from labels import daily_vol, cusum_events, triple_barrier_labels
 
@@ -53,11 +61,10 @@ CPCV_N          = 6              # split into N groups
 CPCV_K          = 2              # k groups per test set → C(N,K) paths
 EMBARGO_TD      = 21             # embargo in trading days (= feature lookback)
 
-# Execution costs
+# Signal costs
 COMMISSION_BPS  = 3
 SLIPPAGE_BPS    = 2
-MAX_POSITION    = 0.10           # max weight per stock (10% → max 10 positions)
-GROSS_LIMIT     = 1.0            # long-only
+ROUND_TRIP_COST = 2 * (COMMISSION_BPS + SLIPPAGE_BPS) / 10_000
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -155,6 +162,18 @@ def build_label_cache(
     return label_cache
 
 
+def label_end_times(label_cache: dict[str, pd.DataFrame]) -> pd.Series:
+    """Return the latest label end time for each event date across tickers."""
+    rows = [
+        labels["t_touch"]
+        for labels in label_cache.values()
+        if not labels.empty and "t_touch" in labels
+    ]
+    if not rows:
+        return pd.Series(dtype="datetime64[ns]")
+    return pd.concat(rows).groupby(level=0).max().sort_index()
+
+
 def build_feature_cache(
     data: dict,
     event_dates: pd.DatetimeIndex,
@@ -185,22 +204,25 @@ def run_fold(
     feat_cache: dict,
     train_dates: pd.DatetimeIndex,
     test_dates: pd.DatetimeIndex,
-) -> pd.Series:
+) -> tuple[pd.Series, dict]:
     """
-    Run one (train, test) fold. Returns daily return series for the test period.
+    Run one (train, test) fold. Returns daily returns plus signal metrics.
 
     The strategy receives:
-      - train_features: feature matrix for all events in train_dates
-      - train_labels:   label DataFrame for all events in train_dates
+      - train_features: feature matrix for purged/embargoed training events
+      - train_labels:   triple-barrier bin labels for those training events
       - test_features:  feature matrix for events in test_dates (no labels)
     And returns:
-      - signals: Series {ticker: signal_strength} for the test period rebalance dates
+      - signals: date → Series{ticker: positive value}
+
+    Each positive signal opens one independent long event. The event exits when
+    its precomputed triple-barrier label touches PT, SL, or the vertical barrier.
+    No portfolio max-stock cap, gross limit, or periodic rebalance is applied.
     """
     close = data["close"]
-    pit   = data["pit"]
 
     # Collect train samples across all tickers
-    train_rows, test_rows = [], []
+    train_rows, test_rows, outcome_rows = [], [], []
 
     for ticker, labels in label_cache.items():
         train_labels = labels[labels.index.isin(train_dates)]
@@ -218,12 +240,21 @@ def run_fold(
                 row = feat_cache[t0].loc[ticker].to_dict()
                 row.update({"t0": t0, "ticker": ticker, "label": None, "bin": None})
                 test_rows.append(row)
+                outcome_rows.append({
+                    "t0": t0,
+                    "ticker": ticker,
+                    "t_touch": lrow["t_touch"],
+                    "ret": lrow["ret"],
+                    "label": lrow["label"],
+                    "bin": lrow["bin"],
+                })
 
     if not train_rows or not test_rows:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float), signal_metrics(pd.DataFrame(), 0)
 
     train_df = pd.DataFrame(train_rows).set_index(["t0", "ticker"])
     test_df  = pd.DataFrame(test_rows).set_index(["t0", "ticker"])
+    outcomes = pd.DataFrame(outcome_rows).set_index(["t0", "ticker"])
 
     feature_cols = [c for c in train_df.columns if c not in ("label", "bin", "ret")]
 
@@ -235,71 +266,107 @@ def run_fold(
         )
     except Exception as e:
         print(f"  strategy error: {e}")
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float), signal_metrics(pd.DataFrame(), len(test_dates))
 
-    # Simulate execution: for each test date, apply signals as portfolio weights
-    daily_returns = []
-    rebal_every = getattr(strategy_module, "REBALANCE_EVERY", 5)
-    current_weights = pd.Series(0.0, index=close.columns)
-    days_since_rebal = 0
-    pct_ret = close.pct_change(fill_method=None)
+    realized = []
+    active_until: dict[str, pd.Timestamp] = {}
 
-    for date in sorted(test_dates):
-        if date not in close.index:
-            continue
-        loc = close.index.get_loc(date)
-        if loc + 2 >= len(close.index):
+    for date in sorted(signals_by_date):
+        raw_signals = signals_by_date[date]
+        if raw_signals is None or len(raw_signals) == 0:
             continue
 
-        exec_date   = close.index[loc + 1]
-        return_date = close.index[loc + 2]
+        for ticker in raw_signals[raw_signals > 0].index:
+            key = (date, ticker)
+            if key not in outcomes.index:
+                continue
+            if ticker in active_until and date <= active_until[ticker]:
+                continue
 
-        if days_since_rebal >= rebal_every:
-            # get signals for this date
-            if date in signals_by_date:
-                raw_signals = signals_by_date[date]
-            else:
-                # find nearest prior signal date
-                prior = [d for d in signals_by_date if d <= date]
-                raw_signals = signals_by_date[max(prior)] if prior else pd.Series(dtype=float)
+            outcome = outcomes.loc[key]
+            exit_date = outcome["t_touch"]
+            if pd.isna(exit_date) or exit_date not in close.index:
+                continue
 
-            # convert signals to weights (long-only, constrained)
-            pos = raw_signals[raw_signals > 0].reindex(close.columns).fillna(0.0)
-            pos = pos.clip(0, MAX_POSITION)
-            gross = pos.sum()
-            if gross > GROSS_LIMIT:
-                pos = pos / gross * GROSS_LIMIT
-            new_weights = pos
+            active_until[ticker] = exit_date
+            hold_days = (exit_date - date).days
+            realized.append({
+                "entry_date": date,
+                "exit_date": exit_date,
+                "ticker": ticker,
+                "ret": float(outcome["ret"]) - ROUND_TRIP_COST,
+                "label": int(outcome["label"]),
+                "holding_days": hold_days,
+            })
 
-            # transaction costs
-            turnover = (new_weights - current_weights).abs().sum()
-            if turnover > 0:
-                recent_vol = pct_ret.iloc[max(0, loc - 21):loc].std().mean()
-                long_vol   = pct_ret.iloc[max(0, loc - 252):loc].std().mean()
-                vol_factor = min(2.5, max(1.0, recent_vol / (long_vol + 1e-9)))
-                cost = turnover * (COMMISSION_BPS + SLIPPAGE_BPS * vol_factor) * 2 / 10_000
-            else:
-                cost = 0.0
+    if not realized:
+        return pd.Series(dtype=float), signal_metrics(pd.DataFrame(), len(test_dates))
 
-            current_weights = new_weights
-            days_since_rebal = 0
-        else:
-            cost = 0.0
+    trades = pd.DataFrame(realized)
+    exit_returns = trades.groupby("exit_date")["ret"].mean()
+    end_date = max(max(test_dates), exit_returns.index.max())
+    test_index = close.index[(close.index >= min(test_dates)) & (close.index <= end_date)]
+    returns = pd.Series(0.0, index=test_index)
+    returns.loc[returns.index.intersection(exit_returns.index)] = exit_returns
+    return returns, signal_metrics(trades, len(test_index))
 
-        if return_date not in close.index or exec_date not in close.index:
-            days_since_rebal += 1
-            continue
 
-        day_ret = (close.loc[return_date] / close.loc[exec_date] - 1).fillna(0.0)
-        port_ret = current_weights.dot(day_ret) - cost
-        daily_returns.append((return_date, port_ret))
-        days_since_rebal += 1
+def signal_metrics(trades: pd.DataFrame, n_days: int) -> dict:
+    if trades.empty:
+        return {
+            "num_signals": 0,
+            "upper_hits": 0,
+            "upper_hit_rate": 0.0,
+            "avg_signal_ret": 0.0,
+            "median_signal_ret": 0.0,
+            "profit_factor": 0.0,
+            "avg_holding_days": 0.0,
+            "signal_frequency": 0.0,
+        }
 
-    if not daily_returns:
-        return pd.Series(dtype=float)
+    rets = trades["ret"].astype(float)
+    gains = rets[rets > 0].sum()
+    losses = rets[rets < 0].sum()
+    n_years = max(n_days / 252, 1 / 252)
+    upper_hits = int((trades["label"] == 1).sum())
 
-    dates_out, rets = zip(*daily_returns)
-    return pd.Series(list(rets), index=pd.DatetimeIndex(dates_out))
+    return {
+        "num_signals": int(len(trades)),
+        "upper_hits": upper_hits,
+        "upper_hit_rate": upper_hits / len(trades),
+        "avg_signal_ret": float(rets.mean()),
+        "median_signal_ret": float(rets.median()),
+        "profit_factor": float(gains / abs(losses)) if losses < 0 else float("inf"),
+        "avg_holding_days": float(trades["holding_days"].mean()),
+        "signal_frequency": float(len(trades) / n_years),
+    }
+
+
+def aggregate_signal_metrics(path_signal_metrics: dict[int, dict]) -> dict:
+    metrics = list(path_signal_metrics.values())
+    if not metrics:
+        return signal_metrics(pd.DataFrame(), 0) | {"hit_rate_std": 0.0}
+
+    total_signals = sum(m["num_signals"] for m in metrics)
+    total_upper_hits = sum(m["upper_hits"] for m in metrics)
+    hit_rates = [m["upper_hit_rate"] for m in metrics if m["num_signals"] > 0]
+
+    def weighted_avg(key: str) -> float:
+        if total_signals == 0:
+            return 0.0
+        return sum(m[key] * m["num_signals"] for m in metrics) / total_signals
+
+    return {
+        "num_signals": int(total_signals),
+        "upper_hits": int(total_upper_hits),
+        "upper_hit_rate": total_upper_hits / total_signals if total_signals else 0.0,
+        "avg_signal_ret": weighted_avg("avg_signal_ret"),
+        "median_signal_ret": weighted_avg("median_signal_ret"),
+        "profit_factor": float(np.mean([m["profit_factor"] for m in metrics])),
+        "avg_holding_days": weighted_avg("avg_holding_days"),
+        "signal_frequency": float(np.mean([m["signal_frequency"] for m in metrics])),
+        "hit_rate_std": float(np.std(hit_rates)) if hit_rates else 0.0,
+    }
 
 
 def compute_metrics(returns: pd.Series) -> dict:
@@ -338,6 +405,7 @@ if __name__ == "__main__":
 
     print(f"Building labels (pt={pt_sl[0]}×vol, sl={pt_sl[1]}×vol, hold={max_hold}d) …")
     label_cache = build_label_cache(data, pt_sl, max_hold, vol_span)
+    label_ends = label_end_times(label_cache)
     all_event_dates = pd.DatetimeIndex(sorted({
         t0 for labels in label_cache.values() for t0 in labels.index
     }))
@@ -352,26 +420,42 @@ if __name__ == "__main__":
 
     if use_cpcv:
         print(f"Running CPCV (N={CPCV_N}, K={CPCV_K}, embargo={EMBARGO_TD}d) …")
-        splits = cpcv_splits(all_event_dates, n=CPCV_N, k=CPCV_K, embargo_td=EMBARGO_TD)
+        splits = cpcv_splits(
+            all_event_dates,
+            n=CPCV_N,
+            k=CPCV_K,
+            embargo_td=EMBARGO_TD,
+            label_end_times=label_ends,
+        )
     else:
         print("Running walk-forward (fast mode) …")
         splits = [(tr, te, i) for i, (tr, te) in
-                  enumerate(walk_forward_splits(all_event_dates, embargo_td=EMBARGO_TD))]
+                  enumerate(walk_forward_splits(
+                      all_event_dates,
+                      embargo_td=EMBARGO_TD,
+                      label_end_times=label_ends,
+                  ))]
 
     path_returns = {}
+    path_signal_metrics = {}
     folds_passed = 0
 
     for train_dates, test_dates, path_id in splits:
         importlib.reload(strategy)
-        fold_ret = run_fold(strategy, data, label_cache, feat_cache, train_dates, test_dates)
+        fold_ret, signal_stats = run_fold(
+            strategy, data, label_cache, feat_cache, train_dates, test_dates
+        )
         m = compute_metrics(fold_ret)
+        path_signal_metrics[path_id] = signal_stats
 
         passed = m["sharpe"] > 0
         if passed:
             folds_passed += 1
         flag = "✓" if passed else "✗"
         print(f"  path {path_id:02d}: sharpe={m['sharpe']:+.3f}  "
-              f"dd={m['max_drawdown']:.1f}%  {flag}")
+              f"dd={m['max_drawdown']:.1f}%  "
+              f"signals={signal_stats['num_signals']}  "
+              f"hit={signal_stats['upper_hit_rate']:.1%}  {flag}")
 
         if not fold_ret.empty:
             path_returns[path_id] = fold_ret
@@ -384,6 +468,7 @@ if __name__ == "__main__":
     oos_cagr       = float(np.mean(cagr_dist))   if cagr_dist  else 0.0
     # worst drawdown across paths — the correct metric for CPCV
     worst_dd       = min((m["max_drawdown"] for m in path_metrics.values()), default=0.0)
+    signal_summary = aggregate_signal_metrics(path_signal_metrics)
 
     elapsed = time.time() - t0_wall
 
@@ -394,4 +479,12 @@ if __name__ == "__main__":
     print(f"cpcv_paths:      {len(path_returns)}")
     print(f"folds_passed:    {folds_passed}/{len(splits)}")
     print(f"max_drawdown:    {worst_dd:.2f}%")
+    print(f"num_signals:     {signal_summary['num_signals']}")
+    print(f"upper_hit_rate:  {signal_summary['upper_hit_rate']:.4f}")
+    print(f"avg_signal_ret:  {signal_summary['avg_signal_ret']:.4f}")
+    print(f"median_signal_ret: {signal_summary['median_signal_ret']:.4f}")
+    print(f"profit_factor:   {signal_summary['profit_factor']:.4f}")
+    print(f"avg_holding_days: {signal_summary['avg_holding_days']:.2f}")
+    print(f"signal_frequency: {signal_summary['signal_frequency']:.2f}")
+    print(f"hit_rate_std:    {signal_summary['hit_rate_std']:.4f}")
     print(f"elapsed_seconds: {elapsed:.1f}")

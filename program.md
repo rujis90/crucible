@@ -22,6 +22,11 @@ The std tells you how regime-dependent the signal is. Low std = robust edge.
 **Hard constraints — discard if ANY violated:**
 - `max_drawdown` worse than -35%
 - `oos_sharpe_std > 0.5`
+- `num_signals < 100`
+- `upper_hit_rate < 0.45`
+- `avg_signal_ret <= 0`
+- `profit_factor < 1.05`
+- `hit_rate_std > 0.10`
 - `elapsed_seconds > 600`
 
 ---
@@ -45,14 +50,16 @@ Two frameworks guide what to look for. They are complementary, not competing.
 
 The research loop connects these: Qullamaggie's pattern recognition becomes a feature
 filter in `get_signals()`. LdP's framework tests whether the pattern actually predicts
-the triple-barrier outcome out-of-sample across multiple market regimes.
+the triple-barrier outcome out-of-sample across multiple market regimes. A signal
+is an event, not a portfolio rebalance; it exits when PT, SL, or max hold is hit.
 
 ---
 
 ## Current baseline
 
-`strategy.py` = cross-sectional momentum top-10 by `ret_21d`. Equal weight.
-No filters, no ML.
+`strategy.py` = label-driven univariate rule. It searches the purged training set
+for the single feature threshold with the best triple-barrier label edge, then
+fires all matching test signals. No top-N, max-stock cap, or rebalance schedule.
 
 **Baseline results (full CPCV):**
 ```
@@ -108,17 +115,17 @@ See `examples/` for experiments already run.
 - Try: PT=2.0, SL=0.75 (asymmetric — bigger winners, tighter stops)
 - Hypothesis: matches Qullamaggie's cut fast / let run philosophy
 
-**Top N count** (`top_n`)
-- Try 5 or 15 instead of 10
-- 5 = concentrated, higher vol but potentially better alpha quality
-- 15 = diversified, lower vol but alpha may dilute
+**Signal threshold breadth**
+- Tune the feature threshold or minimum edge before adding complex models
+- Narrow thresholds fire fewer, cleaner signals
+- Wider thresholds fire more signals but may dilute edge
 
 ### Tier 3 — Interesting but complex
 
-**ML ranking** — train a gradient boosting classifier on CPCV train folds
+**ML signal classifier** — train a classifier on CPCV train folds
 - Features: `(ret_21d, rs_rank, vol_ratio, px_pos_52w, dv_rank)`
 - Label: `bin` (upper barrier = +1, lower/time = 0)
-- Use predicted probability as signal strength instead of equal weight
+- Fire signals only when predicted probability clears a threshold
 - Caution: training on each fold with no leakage adds significant runtime
 
 **200-day MA regime filter** (requires NDX index close)
@@ -126,9 +133,9 @@ See `examples/` for experiments already run.
 - Hard binary regime: Bull (above MA) = trade, Bear (below) = cash
 - Qullamaggie: "I don't trade bear markets"
 
-**Signal-proportional sizing**
-- Weight positions by model probability or RS rank score rather than equal weight
-- Tickers with highest conviction get more size
+**Meta-labeling filter**
+- Keep the side simple, then learn whether a candidate signal should be accepted
+- Use `train_labels` directly; do not inspect test labels
 
 ---
 
@@ -136,11 +143,11 @@ See `examples/` for experiments already run.
 
 1. Read `results.tsv` — understand what's been tried and the quality trajectory
 2. Read `examples/` — see actual code from past experiments
-3. Form ONE hypothesis with a one-sentence economic rationale
+3. Form ONE hypothesis with a one-sentence economic rationale tied to the triple-barrier outcome
 4. Edit `strategy.py` — one change only
 5. Run fast first: set `USE_CPCV = False`, run `python backtest.py` (~60s)
-6. If fast result looks promising (sharpe > 0.5): switch `USE_CPCV = True`, re-run (~5 min)
-7. If `quality > current_best`: commit + append keep row to `results.tsv`
+6. If fast result looks promising (sharpe > 0.5 and signal metrics pass): switch `USE_CPCV = True`, re-run (~5 min)
+7. If `quality > current_best` and all signal/CPCV hard constraints pass: commit + append keep row to `results.tsv`
 8. Else: `git checkout -- strategy.py`, append discard row
 
 ---
@@ -157,4 +164,6 @@ See `examples/` for experiments already run.
 
 5. **Std is the real signal.** Tightening `oos_sharpe_std` while holding Sharpe flat is progress. It means the signal is working consistently, not just getting lucky in bull-market paths.
 
-6. **Qullamaggie's mantra in quant form:** You don't need to trade every day. Going flat (zero weights) on days when conditions aren't right is a valid and often superior position. The regime gate is not a constraint — it's an edge.
+6. **Qullamaggie's mantra in quant form:** You don't need signals every day. Not firing is a valid decision when the learned edge is absent.
+
+7. **Labels are the box.** Every experiment must use `train_labels` to learn or accept signals. Never recreate labels from future test prices in `strategy.py`; the framework owns exits through PT, SL, and max hold.

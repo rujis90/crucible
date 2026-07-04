@@ -29,13 +29,13 @@ Crucible fixes all three ways backtests lie:
 
 **Five files matter:**
 
-- **`backtest.py`** — fixed infrastructure. CPCV harness, T+1 execution, transaction costs. **Never modify.**
+- **`backtest.py`** — fixed infrastructure. CPCV harness, signal exits, transaction costs. **Never modify.**
 - **`labels.py`** — triple barrier labeling (López de Prado AFML Ch. 3). **Never modify.**
 - **`features.py`** — 14 cross-sectionally z-scored features. **Never modify.**
 - **`cv.py`** — combinatorial purged CV with embargo. **Never modify.**
-- **`strategy.py`** — the single file the agent edits. Signal logic, position sizing, parameters. **This is the research surface.**
+- **`strategy.py`** — the single file the agent edits. Signal selection logic and label-driven parameters. **This is the research surface.**
 
-Each experiment takes 1–10 minutes (walk-forward fast mode / full CPCV). The metric is **`oos_sharpe / oos_sharpe_std`** — mean Sharpe across all 15 CPCV paths divided by its standard deviation. A robust strategy with Sharpe 0.80 ± 0.08 beats a fragile one at 1.1 ± 0.6.
+Each experiment takes 1–10 minutes (walk-forward fast mode / full CPCV). The metric is **`oos_sharpe / oos_sharpe_std`** — mean Sharpe across all 15 combinatorial OOS splits divided by its standard deviation. A robust strategy with Sharpe 0.80 ± 0.08 beats a fragile one at 1.1 ± 0.6.
 
 ---
 
@@ -99,6 +99,11 @@ Each batch is a stateless Claude Code invocation — it reads `results.tsv` and 
 
 ## What the agent optimises
 
+The agent searches for signal rules. A signal is an event: it enters on a
+date/ticker and exits when the triple-barrier box is resolved — profit target,
+stop loss, or max holding time. There is no portfolio rebalance schedule, max
+stock count, or gross exposure cap in the research surface.
+
 ```
 oos_sharpe:      0.79    ← mean Sharpe across all CPCV paths
 oos_sharpe_std:  0.09    ← distribution tightness — the real signal
@@ -132,11 +137,11 @@ The purchase also includes 6 CLAUDE.md skill files covering the full methodology
 ## Project structure
 
 ```
-backtest.py           — CPCV harness + T+1 execution (do not modify)
+backtest.py           — CPCV harness + signal exits (do not modify)
 labels.py             — triple barrier labeling
 features.py           — 14 CS z-scored features
 cv.py                 — purging, embargo, CPCV splits
-strategy.py           — signal logic (agent modifies this)
+strategy.py           — signal selection logic (agent modifies this)
 CLAUDE.md             — methodology guide for Claude Code
 program.md            — research search space and guiding principles
 research_step.md      — per-batch agent instructions

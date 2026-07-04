@@ -1,33 +1,71 @@
-"""
-strategy.py — the only file you modify.
+"""strategy.py — the agent-editable signal rule.
 
-Interface (do not rename):
-  REBALANCE_EVERY : int   — trading days between rebalances
-  PT_SL           : list  — [profit_target_mult, stop_loss_mult] in daily vol units
-  MAX_HOLD        : int   — vertical barrier in trading days
-  USE_CPCV        : bool  — True = full CPCV (15 paths), False = fast walk-forward
-  get_signals(train_features, train_labels, test_features) → dict[date, Series]
-
-─────────────────────────────────────────────────────────────────────────────
-Baseline: cross-sectional momentum top-10.
-
-Ranks every NDX-universe ticker by 21-day return (CS z-scored), goes long the
-top 10 with equal weight. No ML, no fitting.
-
-This is the floor — every experiment must beat this on oos_sharpe / oos_sharpe_std.
-See program.md for the full search space and guiding principles.
-See examples/ for strategies that have already been tested.
-─────────────────────────────────────────────────────────────────────────────
+The framework supplies purged training features, their triple-barrier labels,
+and unlabeled test features. This file chooses which test events should become
+signals. The backtester handles exits through the same triple-barrier box that
+created the labels: profit target, stop loss, or max holding time.
 """
 from __future__ import annotations
 
 import pandas as pd
 
-# ── Parameters (tune these too) ───────────────────────────────────────────────
-REBALANCE_EVERY = 5         # weekly rebalance
-PT_SL           = [1.5, 1.0]  # profit target 1.5×vol, stop 1.0×vol
-MAX_HOLD        = 20        # close after 20 trading days if neither barrier hit
-USE_CPCV        = True      # set False for fast iteration, True before keeping
+PT_SL           = [1.5, 1.0]
+MAX_HOLD        = 20
+USE_CPCV        = True
+
+FEATURES_TO_SEARCH = (
+    "ret_21d",
+    "rs_rank",
+    "ret_63d",
+    "px_pos_52w",
+    "vol_ratio",
+    "dv_rank",
+    "vol_momentum",
+)
+QUANTILE = 0.70
+MIN_SAMPLES = 200
+MIN_EDGE = 0.0
+
+
+def _fit_best_univariate_rule(
+    train_features: pd.DataFrame,
+    train_labels: pd.Series,
+) -> tuple[str, str, float] | None:
+    """Find the one-feature rule that improves upper-barrier hit probability."""
+    aligned = train_features.join(train_labels.rename("label"), how="inner").dropna()
+    if aligned.empty:
+        return None
+
+    target = (aligned["label"] > 0).astype(float)
+    base_rate = float(target.mean())
+    best: tuple[float, str, str, float] | None = None
+    for feature in FEATURES_TO_SEARCH:
+        if feature not in aligned.columns:
+            continue
+
+        x = aligned[feature].dropna()
+        if x.nunique() < 10:
+            continue
+
+        y = aligned.loc[x.index, "label"]
+        y_hit = (y > 0).astype(float)
+        candidates = (
+            ("high", x.quantile(QUANTILE), x >= x.quantile(QUANTILE)),
+            ("low", x.quantile(1 - QUANTILE), x <= x.quantile(1 - QUANTILE)),
+        )
+
+        for direction, threshold, mask in candidates:
+            if mask.sum() < MIN_SAMPLES:
+                continue
+            edge = float(y_hit[mask].mean() - base_rate)
+            if best is None or edge > best[0]:
+                best = (edge, feature, direction, float(threshold))
+
+    if best is None or best[0] < MIN_EDGE:
+        return None
+
+    _, feature, direction, threshold = best
+    return feature, direction, threshold
 
 
 def get_signals(
@@ -35,21 +73,12 @@ def get_signals(
     train_labels: pd.Series,
     test_features: pd.DataFrame,
 ) -> dict[pd.Timestamp, pd.Series]:
-    """
-    Return signals for each test date.
-
-    Args:
-        train_features  — (date, ticker) MultiIndex, columns = feature names
-        train_labels    — (date, ticker) MultiIndex, values ∈ {-1, 0, +1}
-        test_features   — same structure, no labels
-
-    Returns:
-        dict: test_date → Series{ticker: signal_strength ∈ [0, 1]}
-        0 = no position, 1 = maximum weight
-        backtest.py caps each position at MAX_POSITION and normalises gross to 1.
-    """
     signals_by_date: dict[pd.Timestamp, pd.Series] = {}
+    rule = _fit_best_univariate_rule(train_features, train_labels)
+    if rule is None:
+        return signals_by_date
 
+    feature, direction, threshold = rule
     if isinstance(test_features.index, pd.MultiIndex):
         test_dates = test_features.index.get_level_values("t0").unique()
     else:
@@ -63,20 +92,16 @@ def get_signals(
                 else test_features.loc[[date]]
             )
 
-            if snapshot.empty or "ret_21d" not in snapshot.columns:
+            if snapshot.empty or feature not in snapshot.columns:
                 signals_by_date[date] = pd.Series(dtype=float)
                 continue
 
-            momentum = snapshot["ret_21d"].dropna()
-            if momentum.empty:
-                signals_by_date[date] = pd.Series(dtype=float)
-                continue
-
-            top_n = 10
-            top_tickers = momentum.nlargest(top_n)
-
-            signals = pd.Series(0.0, index=momentum.index)
-            signals[top_tickers.index] = 1.0 / top_n
+            signals = pd.Series(0.0, index=snapshot.index)
+            if direction == "high":
+                selected = snapshot.index[snapshot[feature] >= threshold]
+            else:
+                selected = snapshot.index[snapshot[feature] <= threshold]
+            signals.loc[selected] = 1.0
             signals_by_date[date] = signals
 
         except Exception:

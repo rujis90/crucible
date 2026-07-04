@@ -28,12 +28,15 @@ Standard k-fold CV is wrong for financial time series. Two problems:
    distribution of Sharpe ratios, not just the average.
 
 Usage:
-    from cv import cpcv_splits, purge_train, add_embargo
+    from cv import cpcv_splits
 
-    for train_idx, test_idx in cpcv_splits(n=10, k=2, embargo_td=21):
-        train_idx = purge_train(train_idx, test_idx, label_end_times)
-        train_idx = add_embargo(train_idx, test_idx, embargo_td=21)
-        # train model on train_idx, evaluate on test_idx
+    splits = cpcv_splits(
+        dates=event_dates,
+        n=6,
+        k=2,
+        embargo_td=21,
+        label_end_times=label_end_times,
+    )
 """
 from __future__ import annotations
 
@@ -116,6 +119,51 @@ def add_embargo(
     return purged_embargoed
 
 
+def _apply_purge_and_embargo(
+    train_dates: pd.DatetimeIndex,
+    test_blocks: list[pd.DatetimeIndex],
+    all_dates: pd.DatetimeIndex,
+    embargo_td: int,
+    label_end_times: pd.Series | None,
+) -> pd.DatetimeIndex:
+    """
+    Purge overlapping labels and embargo both sides of each test block.
+
+    For CPCV, test blocks are often non-contiguous. Applying the embargo only
+    around the first test date leaves leakage around later test blocks.
+    """
+    clean = pd.DatetimeIndex(train_dates).sort_values()
+    if clean.empty:
+        return clean
+
+    for block in test_blocks:
+        block = pd.DatetimeIndex(block).sort_values()
+        if block.empty:
+            continue
+
+        test_start = block.min()
+        test_end = block.max()
+
+        if label_end_times is not None:
+            starts = pd.Series(clean, index=clean)
+            end_times = label_end_times.reindex(clean)
+            end_times = end_times.where(end_times.notna(), starts)
+            overlaps_test = (starts <= test_end) & (end_times >= test_start)
+            clean = clean[~overlaps_test]
+
+        if embargo_td > 0 and not clean.empty:
+            start_loc = all_dates.searchsorted(test_start, side="left")
+            end_loc = all_dates.searchsorted(test_end, side="right") - 1
+            left = all_dates[max(0, start_loc - embargo_td)]
+            right = all_dates[min(len(all_dates) - 1, end_loc + embargo_td)]
+
+            inside_pre_embargo = (clean >= left) & (clean < test_start)
+            inside_post_embargo = (clean > test_end) & (clean <= right)
+            clean = clean[~(inside_pre_embargo | inside_post_embargo)]
+
+    return pd.DatetimeIndex(clean).sort_values()
+
+
 # ── combinatorial split generator ─────────────────────────────────────────────
 
 def cpcv_splits(
@@ -123,6 +171,7 @@ def cpcv_splits(
     n: int = 6,
     k: int = 2,
     embargo_td: int = 21,
+    label_end_times: pd.Series | None = None,
 ) -> list[tuple[pd.DatetimeIndex, pd.DatetimeIndex, int]]:
     """
     Generate CPCV splits: C(n, k) paths, each with a complete test history.
@@ -140,6 +189,8 @@ def cpcv_splits(
         n:          number of groups to split into
         k:          number of groups in each test set (k < n)
         embargo_td: trading days to embargo around test windows
+        label_end_times: optional Series mapping event start t0 → label end
+                         t_touch. Required for true purging.
 
     Returns:
         List of (train_dates, test_dates, path_id) tuples.
@@ -155,24 +206,19 @@ def cpcv_splits(
 
     splits = []
     for path_id, test_group_ids in enumerate(combos):
-        test_dates  = pd.DatetimeIndex(
-            [d for i in test_group_ids for d in groups[i]]
-        ).sort_values()
+        test_blocks = [pd.DatetimeIndex(groups[i]).sort_values() for i in test_group_ids]
+        test_dates  = pd.DatetimeIndex([d for block in test_blocks for d in block]).sort_values()
         train_dates = pd.DatetimeIndex(
             [d for i in range(n) if i not in test_group_ids for d in groups[i]]
         ).sort_values()
 
-        # apply embargo: remove training dates within embargo_td of any test boundary
-        # (simplified: embargo around test_start only, sufficient for sequential splits)
-        if embargo_td > 0 and len(test_dates) > 0:
-            test_start = test_dates.min()
-            loc = dates.searchsorted(test_start, side="left")
-            embargo_start = dates[max(0, loc - embargo_td)]
-            # only embargo training dates that are near the test boundary
-            # (dates after embargo_start that are also before test_start)
-            train_dates = train_dates[
-                ~((train_dates >= embargo_start) & (train_dates < test_start))
-            ]
+        train_dates = _apply_purge_and_embargo(
+            train_dates=train_dates,
+            test_blocks=test_blocks,
+            all_dates=dates,
+            embargo_td=embargo_td,
+            label_end_times=label_end_times,
+        )
 
         splits.append((train_dates, test_dates, path_id))
 
@@ -242,6 +288,7 @@ def walk_forward_splits(
     train_years: int = 3,
     test_years: int = 1,
     embargo_td: int = 21,
+    label_end_times: pd.Series | None = None,
 ) -> list[tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
     """
     Standard expanding-window walk-forward splits with embargo.
@@ -266,11 +313,13 @@ def walk_forward_splits(
             test_start_year += test_years
             continue
 
-        # embargo
-        if embargo_td > 0:
-            loc = len(train_d)
-            embargo_start = train_d[max(0, loc - embargo_td)]
-            train_d = train_d[train_d < embargo_start]
+        train_d = _apply_purge_and_embargo(
+            train_dates=train_d,
+            test_blocks=[test_d],
+            all_dates=dates,
+            embargo_td=embargo_td,
+            label_end_times=label_end_times,
+        )
 
         splits.append((train_d, test_d))
         test_start_year += test_years
