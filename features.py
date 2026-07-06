@@ -84,6 +84,8 @@ def make_features(
     pit:     pd.DataFrame,
     as_of_date: pd.Timestamp,
     lookback: int = 252,
+    bars_per_day: int = 1,
+    open_: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build a feature matrix for the NDX universe as of a given date.
@@ -132,50 +134,55 @@ def make_features(
     v = volume.loc[hist_dates, universe]
 
     # ── feature computation ───────────────────────────────────────────────────
+    # All window sizes are expressed in trading days and scaled to bars here.
+    # At daily frequency bars_per_day=1 so nothing changes.
+    # At hourly frequency bars_per_day=7 so a "21-day" window = 147 bars.
+    b = bars_per_day
     feats: dict[str, pd.Series] = {}
 
     # 1. Multi-horizon returns (z-scored vs rolling history)
     for days, name in [(1, "ret_1d"), (5, "ret_5d"), (21, "ret_21d"), (63, "ret_63d")]:
-        if len(c) <= days:
+        bars = days * b
+        if len(c) <= bars:
             continue
-        ret = c.pct_change(days, fill_method=None).iloc[-1]
-        # cross-sectional z-score: relative to NDX universe peers on this date
+        ret = c.pct_change(bars, fill_method=None).iloc[-1]
         mu, sd = ret.mean(), ret.std()
         feats[name] = (ret - mu) / (sd + 1e-9)
 
     # 2. Relative strength rank (RS) — percentile within universe
-    if len(c) > 63:
-        ret_63 = c.pct_change(63, fill_method=None).iloc[-1]
+    if len(c) > 63 * b:
+        ret_63 = c.pct_change(63 * b, fill_method=None).iloc[-1]
         feats["rs_rank"] = ret_63.rank(pct=True) * 2 - 1  # scale to [-1, 1]
 
     # 3. Realized volatility (normalized by cross-section)
-    if len(c) > 21:
-        vol_21 = c.pct_change(fill_method=None).iloc[-21:].std()
+    if len(c) > 21 * b:
+        vol_21 = c.pct_change(fill_method=None).iloc[-21 * b:].std()
         vol_mu, vol_sd = vol_21.mean(), vol_21.std()
         feats["vol_21d_cs"] = (vol_21 - vol_mu) / (vol_sd + 1e-9)
 
-    if len(c) > 63:
-        vol_63 = c.pct_change(fill_method=None).iloc[-63:].std()
+    if len(c) > 63 * b:
+        vol_63 = c.pct_change(fill_method=None).iloc[-63 * b:].std()
         vol_mu, vol_sd = vol_63.mean(), vol_63.std()
         feats["vol_63d_cs"] = (vol_63 - vol_mu) / (vol_sd + 1e-9)
 
     # 4. Vol ratio: recent vs historical (regime signal)
-    if len(c) > 63:
+    if len(c) > 63 * b:
         feats["vol_ratio"] = (
-            c.pct_change(fill_method=None).iloc[-21:].std() /
-            (c.pct_change(fill_method=None).iloc[-63:].std() + 1e-9)
+            c.pct_change(fill_method=None).iloc[-21 * b:].std() /
+            (c.pct_change(fill_method=None).iloc[-63 * b:].std() + 1e-9)
         ).apply(np.log)  # log ratio, symmetric around 0
 
     # 5. Dollar volume rank (liquidity proxy)
-    if len(v) > 21 and len(c) > 21:
-        dv = (c * v).iloc[-21:].mean()
+    if len(v) > 21 * b and len(c) > 21 * b:
+        dv = (c * v).iloc[-21 * b:].mean()
         feats["dv_rank"] = dv.rank(pct=True) * 2 - 1
 
     # 6. High-low range / ATR ratio (intraday volatility normalised)
-    if len(h) > 14 and len(l) > 14:
+    atr_window = 14 * b
+    if len(h) > atr_window and len(l) > atr_window:
         hl_range = ((h.iloc[-1] - l.iloc[-1]) / (c.iloc[-1] + 1e-9))
         atr_vals = pd.Series({
-            t: _atr(h[t], l[t], c[t]).iloc[-1]
+            t: _atr(h[t], l[t], c[t], window=atr_window).iloc[-1]
             for t in universe if not c[t].isna().all()
         })
         hl_norm = hl_range / (atr_vals + 1e-9)
@@ -183,16 +190,17 @@ def make_features(
         feats["hl_atr_ratio"] = (hl_norm - mu) / (sd + 1e-9)
 
     # 7. Price position within 52-week range
-    if len(c) >= 252:
-        hi_52 = h.iloc[-252:].max()
-        lo_52 = l.iloc[-252:].min()
+    bars_52w = 252 * b
+    if len(c) >= bars_52w:
+        hi_52 = h.iloc[-bars_52w:].max()
+        lo_52 = l.iloc[-bars_52w:].min()
         px_pos = (c.iloc[-1] - lo_52) / (hi_52 - lo_52 + 1e-9)
         feats["px_pos_52w"] = px_pos * 2 - 1  # scale to [-1, 1]
 
     # 8. MACD signal (trend vs mean-reversion regime indicator)
-    if len(c) > 26:
-        ema12 = c.ewm(span=12, min_periods=6).mean().iloc[-1]
-        ema26 = c.ewm(span=26, min_periods=13).mean().iloc[-1]
+    if len(c) > 26 * b:
+        ema12 = c.ewm(span=12 * b, min_periods=6 * b).mean().iloc[-1]
+        ema26 = c.ewm(span=26 * b, min_periods=13 * b).mean().iloc[-1]
         macd  = (ema12 - ema26) / (c.iloc[-1] + 1e-9)
         mu, sd = macd.mean(), macd.std()
         feats["macd_cs"] = (macd - mu) / (sd + 1e-9)
@@ -202,10 +210,55 @@ def make_features(
         feats["mom_reversal"] = feats["ret_1d"] - feats["ret_21d"]
 
     # 10. Volume momentum: recent vs historical average volume
-    if len(v) > 63:
-        vol_ratio_v = v.iloc[-5:].mean() / (v.iloc[-63:].mean() + 1e-9)
+    if len(v) > 63 * b:
+        vol_ratio_v = v.iloc[-5 * b:].mean() / (v.iloc[-63 * b:].mean() + 1e-9)
         mu, sd = vol_ratio_v.mean(), vol_ratio_v.std()
         feats["vol_momentum"] = (vol_ratio_v - mu) / (sd + 1e-9)
+
+    # ── Hourly-only features (bars_per_day > 1) ───────────────────────────────
+    # These features only exist when we have intraday bars.
+    # They are NaN (and dropped) in daily mode.
+
+    if b > 1:
+        # 11. Opening gap: today's open vs yesterday's close (intraday positioning)
+        # Measures overnight sentiment; large gaps often continue or reverse.
+        if open_ is not None and len(c) >= 2 * b:
+            open_px = open_.loc[hist_dates, universe]
+        else:
+            open_px = None
+        if open_px is not None and len(c) >= 2 * b:
+            today_open  = open_px.iloc[-b]   # first bar today
+            yest_close  = c.iloc[-(b + 1)]                              # last bar yesterday
+            gap = (today_open - yest_close) / (yest_close + 1e-9)
+            mu, sd = gap.mean(), gap.std()
+            feats["open_gap"] = (gap - mu) / (sd + 1e-9)
+
+        # 12. Intraday momentum: last bar vs first bar of today
+        # Captures within-day trend; stocks drifting up all day vs reversing.
+        if len(c) >= b:
+            today_bars = c.iloc[-b:]
+            intraday_ret = (today_bars.iloc[-1] - today_bars.iloc[0]) / (today_bars.iloc[0] + 1e-9)
+            mu, sd = intraday_ret.mean(), intraday_ret.std()
+            feats["intraday_mom"] = (intraday_ret - mu) / (sd + 1e-9)
+
+        # 13. Intraday volume skew: afternoon vs morning volume ratio
+        # High afternoon volume relative to morning = institutional accumulation signal.
+        if len(v) >= b:
+            today_vol  = v.iloc[-b:]
+            half       = max(b // 2, 1)
+            am_vol     = today_vol.iloc[:half].mean()
+            pm_vol     = today_vol.iloc[half:].mean()
+            vol_skew   = pm_vol / (am_vol + 1e-9)
+            mu, sd     = vol_skew.mean(), vol_skew.std()
+            feats["intraday_vol_skew"] = (vol_skew - mu) / (sd + 1e-9)
+
+    # ── Add custom features below this line ───────────────────────────────────
+    # Rules:
+    #   1. Window sizes must use `b = bars_per_day` (e.g., 21 * b, not 21)
+    #   2. Cross-sectionally z-score vs universe on each date (not time-series)
+    #   3. Only use data from hist_dates (past only — no look-ahead)
+    #   4. Return pd.Series indexed by ticker (same as universe list)
+    # ─────────────────────────────────────────────────────────────────────────
 
     if not feats:
         return pd.DataFrame()

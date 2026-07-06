@@ -29,17 +29,38 @@ You are a quant researcher working on a survivorship-bias-free Nasdaq-100 stock 
 ## Architecture you must respect
 
 ### Files you edit
-- `strategy.py` — only this file. Contains signal selection logic and label-driven parameters.
+- `strategy.py` — signal selection logic and label-driven parameters
+- `features.py` — you may ADD new feature functions following the existing patterns
 
 ### Files you never modify
 - `backtest.py` — infrastructure
 - `labels.py` — triple barrier labeling
-- `features.py` — feature engineering
 - `cv.py` — CPCV validation
 
+### Rules for editing features.py
+Adding new features is encouraged. Three invariants must never be broken:
+1. **PIT filter** — only compute features for tickers where `pit.loc[as_of_date] == True`.
+   Never use tickers that weren't in the NDX on that date.
+2. **bars_per_day scaling** — all window sizes must use `b = bars_per_day` as a multiplier.
+   A "21-day" window = `21 * b` bars. Never hardcode bars.
+3. **Cross-sectional z-scoring** — features that compare tickers must be z-scored
+   within the universe on each date. Never use time-series normalization across dates.
+
+New features should be added inside `make_features()` and return a `pd.Series`
+indexed by ticker (same index as the rest of the output).
+
 ### Data files (place in data/)
+
+**Daily dataset (default, 2010–2026, ~16 years)**
 - `ndx_ohlcv.parquet` — OHLCV, MultiIndex (field, ticker) × date
 - `ndx_pit_daily.parquet` — bool DataFrame (date × ticker)
+
+**Hourly dataset (optional, 2023–2026, ~3 years)**
+- `ndx_ohlcv_hourly.parquet` — same format, 7 bars per trading day
+- `ndx_pit_hourly.parquet` — bool DataFrame (hourly bar × ticker)
+
+To switch datasets, set `MODE = "hourly"` (or `"daily"`) at the top of `backtest.py`.
+All windows and barriers auto-scale via `BARS_PER_DAY` — no other changes needed.
 
 ---
 
@@ -63,6 +84,9 @@ All features are cross-sectionally z-scored (mean 0, std 1 within the NDX univer
 | `macd_cs` | MACD, CS z-scored | Trend following |
 | `mom_reversal` | ret_1d − ret_21d | Short-term reversal |
 | `vol_momentum` | Recent vs historical volume | Participation signal |
+| `open_gap` | Today's open vs yesterday's close, CS z-scored | **Hourly only** — overnight gap signal |
+| `intraday_mom` | Last bar vs first bar of today, CS z-scored | **Hourly only** — within-day drift |
+| `intraday_vol_skew` | Afternoon vs morning volume ratio, CS z-scored | **Hourly only** — institutional accumulation proxy |
 
 ---
 
@@ -100,14 +124,22 @@ All features are cross-sectionally z-scored (mean 0, std 1 within the NDX univer
 ## Parameters you can set in strategy.py
 
 ```python
-PT_SL           = [1.5, 1.0]  # [profit_target_vol_mult, stop_loss_vol_mult]
-MAX_HOLD        = 20      # vertical barrier in trading days
-USE_CPCV        = True    # False = faster walk-forward for iteration
+PT_SL           = [1.5, 1.0]   # [profit_target_vol_mult, stop_loss_vol_mult]
+MAX_HOLD        = 20            # vertical barrier in trading days
+CUSUM_H_MULT    = 1.0           # CUSUM threshold = CUSUM_H_MULT × daily_vol
+USE_CPCV        = True          # False = faster walk-forward (daily only)
 ```
 
 `PT_SL = [1.5, 1.0]` means:
 - Upper barrier: entry price × (1 + 1.5 × daily_vol)
 - Lower barrier: entry price × (1 - 1.0 × daily_vol)
+
+`CUSUM_H_MULT` scales the CUSUM sampling threshold. Higher values produce fewer,
+more independent events. Lower values produce more events with more cost drag.
+Default 1.0 fires approximately once per week per ticker.
+
+**For hourly data:** always set `USE_CPCV = True`. Walk-forward gives only 2 folds
+on 3 years of data; CPCV produces 15 paths from the same data by splitting proportionally.
 
 ---
 

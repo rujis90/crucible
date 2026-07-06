@@ -2,18 +2,28 @@
 
 Place your NDX PIT dataset files here.
 
-## Required files
+## Required files (daily mode)
 
 ```
-ndx_ohlcv.parquet       — OHLCV for 210 historical NDX tickers, 2007–present
-ndx_pit_daily.parquet   — bool DataFrame: was ticker in NDX on each date?
+ndx_ohlcv.parquet         — OHLCV for 265 historical NDX tickers, 2007–present
+ndx_pit_daily.parquet     — bool DataFrame: was ticker in NDX on each date?
 ```
+
+## Optional files (hourly mode)
+
+```
+ndx_ohlcv_hourly.parquet  — hourly OHLCV, Aug 2023–present (7 bars/trading day)
+ndx_pit_hourly.parquet    — bool DataFrame: was ticker in NDX at each hourly bar?
+```
+
+Set `MODE = "hourly"` in `backtest.py` to switch to the hourly dataset.
+All barrier and feature windows auto-scale — no other changes needed.
 
 ## Optional (used for diagnostics)
 
 ```
 ndx_pit_summary.csv         — per-ticker entry/exit dates
-ndx_component_changes.csv   — 225 raw add/remove events
+ndx_component_changes.csv   — add/remove events
 MISSING_TICKERS.txt         — tickers with no available price data
 ```
 

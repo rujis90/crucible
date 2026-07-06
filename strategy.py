@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-PT_SL           = [1.5, 1.0]
-MAX_HOLD        = 20
+PT_SL           = [1.5, 1.0]   # [profit_target_vol_mult, stop_loss_vol_mult]
+MAX_HOLD        = 20           # vertical barrier in trading days
+CUSUM_H_MULT    = 1.0          # CUSUM threshold = CUSUM_H_MULT × daily_vol
+                               # higher → fewer, more independent events
+                               # lower  → more events, more cost drag
 USE_CPCV        = True
 
 FEATURES_TO_SEARCH = (
@@ -21,6 +24,10 @@ FEATURES_TO_SEARCH = (
     "vol_ratio",
     "dv_rank",
     "vol_momentum",
+    # Hourly-only (NaN in daily mode — automatically skipped by univariate rule)
+    "open_gap",
+    "intraday_mom",
+    "intraday_vol_skew",
 )
 QUANTILE = 0.70
 MIN_SAMPLES = 200

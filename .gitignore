@@ -1,5 +1,10 @@
-data.parquet
+# Data files — never commit these
 data/*.parquet
+data/*.csv
+data/*.txt
+data.parquet
+
+# Runtime artifacts
 run.log
 __pycache__/
 *.pyc

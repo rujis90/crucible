@@ -25,7 +25,7 @@ import pandas as pd
 
 # ── volatility estimator ──────────────────────────────────────────────────────
 
-def daily_vol(close: pd.DataFrame, span: int = 100) -> pd.DataFrame:
+def daily_vol(close: pd.DataFrame, span: int = 100, bars_per_day: int = 1) -> pd.DataFrame:
     """
     Exponentially weighted daily return volatility.
 
@@ -34,14 +34,24 @@ def daily_vol(close: pd.DataFrame, span: int = 100) -> pd.DataFrame:
     so they adapt to each stock's current volatility regime.
 
     Args:
-        close: DataFrame of adjusted close prices (date × ticker)
-        span:  EWM span in trading days (~lookback half-life = span * ln(2))
+        close:        DataFrame of adjusted close prices (bar × ticker)
+        span:         EWM span in bars (~lookback half-life = span * ln(2))
+        bars_per_day: bars per trading day (1=daily, 7=hourly).
+                      Output is multiplied by √bars_per_day so the returned
+                      volatility is always in daily-return units regardless
+                      of bar frequency. Barriers calibrated from this vol
+                      will therefore have consistent economic meaning across
+                      both daily and hourly datasets.
 
     Returns:
         DataFrame of same shape as close, values are daily volatility estimates.
     """
     rets = close.pct_change(fill_method=None)
-    return rets.ewm(span=span, min_periods=span // 2).std()
+    vol  = rets.ewm(span=span, min_periods=span // 2).std()
+    if bars_per_day > 1:
+        import math
+        vol = vol * math.sqrt(bars_per_day)
+    return vol
 
 
 # ── CUSUM event filter ────────────────────────────────────────────────────────
@@ -144,6 +154,7 @@ def triple_barrier_labels(
     pt_sl: list[float],
     max_hold: int = 20,
     min_ret: float = 0.0,
+    bars_per_day: int = 1,
 ) -> pd.DataFrame:
     """
     Apply triple barrier labeling to a series of event dates.
@@ -171,7 +182,7 @@ def triple_barrier_labels(
           label    — +1 (upper), -1 (lower), 0 (vertical / no signal)
           bin      — same as label but 0→+1 if min_ret filter applied (for meta-labeling)
     """
-    vol = daily_vol(close.to_frame("px"))["px"]
+    vol = daily_vol(close.to_frame("px"), bars_per_day=bars_per_day)["px"]
     idx = close.index
 
     pt_mult = pt_sl[0]

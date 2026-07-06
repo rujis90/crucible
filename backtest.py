@@ -44,22 +44,31 @@ warnings.filterwarnings("ignore")
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 
-DATA_DIR        = Path(__file__).parent / "data"
-OHLCV_FILE      = DATA_DIR / "ndx_ohlcv.parquet"
-PIT_FILE        = DATA_DIR / "ndx_pit_daily.parquet"
+MODE = "hourly"  # "daily"  → ndx_ohlcv.parquet + ndx_pit_daily.parquet
+                 # "hourly" → ndx_ohlcv_hourly.parquet + ndx_pit_hourly.parquet
 
-START_DATE      = "2010-01-01"   # 3 years of history before first test fold
-END_DATE        = "2026-12-31"
+# Derived — do not set these manually
+BARS_PER_DAY = {"daily": 1, "hourly": 7}[MODE]
+ANN_FACTOR   = 252 * BARS_PER_DAY   # bars per year (for Sharpe / CAGR)
 
-# Triple barrier parameters (tunable in strategy.py)
-DEFAULT_PT_SL   = [1.5, 1.0]    # profit target, stop loss (in daily vol units)
+DATA_DIR   = Path(__file__).parent / "data"
+OHLCV_FILE = DATA_DIR / {"daily": "ndx_ohlcv.parquet",
+                          "hourly": "ndx_ohlcv_hourly.parquet"}[MODE]
+PIT_FILE   = DATA_DIR / {"daily": "ndx_pit_daily.parquet",
+                          "hourly": "ndx_pit_hourly.parquet"}[MODE]
+
+START_DATE = {"daily": "2010-01-01", "hourly": "2023-08-01"}[MODE]
+END_DATE   = "2026-12-31"
+
+# Triple barrier parameters (tunable in strategy.py — always in trading DAYS)
+DEFAULT_PT_SL    = [1.5, 1.0]   # profit target, stop loss (vol multiples)
 DEFAULT_MAX_HOLD = 20            # vertical barrier in trading days
-DEFAULT_VOL_SPAN = 100           # EWM span for vol estimation
+DEFAULT_VOL_SPAN = 100           # EWM lookback in trading days
 
 # CPCV parameters
-CPCV_N          = 6              # split into N groups
-CPCV_K          = 2              # k groups per test set → C(N,K) paths
-EMBARGO_TD      = 21             # embargo in trading days (= feature lookback)
+CPCV_N     = 6    # split into N groups
+CPCV_K     = 2    # k groups per test set → C(N,K) paths
+EMBARGO_TD = 21 * BARS_PER_DAY  # embargo in bars (scales with frequency)
 
 # Signal costs
 COMMISSION_BPS  = 3
@@ -93,20 +102,30 @@ def load_data() -> dict:
     ohlcv = pd.read_parquet(OHLCV_FILE)
     pit   = pd.read_parquet(PIT_FILE)
 
+    # Strip timezone — hourly files are tz-aware (ET), daily are tz-naive.
+    # All internal logic is tz-naive; ET is implied for all NDX data.
+    if ohlcv.index.tz is not None:
+        ohlcv.index = ohlcv.index.tz_localize(None)
+    if pit.index.tz is not None:
+        pit.index = pit.index.tz_localize(None)
+
     # Restrict to configured date range
     ohlcv = ohlcv.loc[START_DATE:END_DATE]
     pit   = pit.loc[START_DATE:END_DATE]
 
     # Align indices
-    shared_dates = ohlcv.index.intersection(pit.index)
-    ohlcv = ohlcv.loc[shared_dates]
-    pit   = pit.loc[shared_dates]
+    shared = ohlcv.index.intersection(pit.index)
+    ohlcv  = ohlcv.loc[shared]
+    pit    = pit.loc[shared]
 
+    fields = ohlcv.columns.get_level_values(0).unique()
+    # auto_adjust=True → "close" is already split-adjusted in both daily and hourly.
+    # "adj close" only appears for failed downloads (all-NaN); always use "close".
     close  = ohlcv["close"]
     high   = ohlcv["high"]
     low    = ohlcv["low"]
     volume = ohlcv["volume"]
-    open_  = ohlcv["open"] if "open" in ohlcv.columns.get_level_values(0) else close
+    open_  = ohlcv["open"] if "open" in fields else close
 
     return {
         "close":  close,
@@ -123,6 +142,8 @@ def build_label_cache(
     pt_sl: list[float],
     max_hold: int,
     vol_span: int,
+    bars_per_day: int = 1,
+    cusum_h_mult: float = 1.0,
 ) -> dict[str, pd.DataFrame]:
     """
     Pre-compute triple barrier labels for all tickers.
@@ -138,7 +159,7 @@ def build_label_cache(
     pit    = data["pit"]
 
     all_tickers = [t for t in pit.columns if t in close.columns]
-    vol_all = daily_vol(close[all_tickers], span=vol_span)
+    vol_all = daily_vol(close[all_tickers], span=vol_span, bars_per_day=bars_per_day)
 
     label_cache = {}
     for ticker in all_tickers:
@@ -150,12 +171,12 @@ def build_label_cache(
         if len(c) < max_hold * 3:
             continue
 
-        # CUSUM threshold: 1× daily vol (sample ~1 event per week on average)
-        events = cusum_events(c, h=v)
+        events = cusum_events(c, h=v * cusum_h_mult)
         if len(events) < 10:
             continue
 
-        labels = triple_barrier_labels(c, h, l, events, pt_sl, max_hold)
+        labels = triple_barrier_labels(c, h, l, events, pt_sl, max_hold,
+                                       bars_per_day=bars_per_day)
         if not labels.empty:
             label_cache[ticker] = labels
 
@@ -178,6 +199,7 @@ def build_feature_cache(
     data: dict,
     event_dates: pd.DatetimeIndex,
     lookback: int = 252,
+    bars_per_day: int = 1,
 ) -> dict[pd.Timestamp, pd.DataFrame]:
     """
     Pre-compute feature matrices for each unique event date.
@@ -191,6 +213,8 @@ def build_feature_cache(
         feats = make_features(
             data["close"], data["high"], data["low"], data["volume"],
             data["pit"], as_of_date=date, lookback=lookback,
+            bars_per_day=bars_per_day,
+            open_=data.get("open"),
         )
         if not feats.empty:
             feat_cache[date] = feats
@@ -327,7 +351,7 @@ def signal_metrics(trades: pd.DataFrame, n_days: int) -> dict:
     rets = trades["ret"].astype(float)
     gains = rets[rets > 0].sum()
     losses = rets[rets < 0].sum()
-    n_years = max(n_days / 252, 1 / 252)
+    n_years = max(n_days / ANN_FACTOR, 1 / ANN_FACTOR)
     upper_hits = int((trades["label"] == 1).sum())
 
     return {
@@ -372,10 +396,9 @@ def aggregate_signal_metrics(path_signal_metrics: dict[int, dict]) -> dict:
 def compute_metrics(returns: pd.Series) -> dict:
     if returns.empty or returns.std() == 0:
         return {"sharpe": 0.0, "cagr": 0.0, "max_drawdown": 0.0}
-    ann = 252
-    sharpe  = returns.mean() / returns.std() * np.sqrt(ann)
+    sharpe  = returns.mean() / returns.std() * np.sqrt(ANN_FACTOR)
     cum     = (1 + returns).cumprod()
-    n_years = len(returns) / ann
+    n_years = len(returns) / ANN_FACTOR
     cagr    = float(cum.iloc[-1] ** (1 / max(n_years, 0.01)) - 1) * 100
     roll_max = cum.cummax()
     max_dd   = float(((cum - roll_max) / roll_max).min()) * 100
@@ -394,17 +417,25 @@ if __name__ == "__main__":
     data = load_data()
     close = data["close"]
     pit   = data["pit"]
+    print(f"Mode: {MODE}  ({BARS_PER_DAY} bar{'s' if BARS_PER_DAY > 1 else ''}/day)")
     print(f"Universe: {pit.sum(axis=1).iloc[-1]:.0f} current NDX members  "
           f"| {pit.shape[1]} historical  "
           f"| {close.index[0].date()} → {close.index[-1].date()}")
 
-    # Strategy-level config overrides
-    pt_sl    = getattr(strategy, "PT_SL",    DEFAULT_PT_SL)
-    max_hold = getattr(strategy, "MAX_HOLD", DEFAULT_MAX_HOLD)
-    vol_span = getattr(strategy, "VOL_SPAN", DEFAULT_VOL_SPAN)
+    # Strategy-level config overrides (strategy expresses params in trading DAYS;
+    # multiply by BARS_PER_DAY to convert to bars for internal use)
+    pt_sl          = getattr(strategy, "PT_SL",          DEFAULT_PT_SL)
+    max_hold_days  = getattr(strategy, "MAX_HOLD",        DEFAULT_MAX_HOLD)
+    vol_span_days  = getattr(strategy, "VOL_SPAN",        DEFAULT_VOL_SPAN)
+    cusum_h_mult   = getattr(strategy, "CUSUM_H_MULT",    1.0)
+    max_hold = max_hold_days * BARS_PER_DAY
+    vol_span = vol_span_days * BARS_PER_DAY
 
-    print(f"Building labels (pt={pt_sl[0]}×vol, sl={pt_sl[1]}×vol, hold={max_hold}d) …")
-    label_cache = build_label_cache(data, pt_sl, max_hold, vol_span)
+    print(f"Building labels (pt={pt_sl[0]}×vol, sl={pt_sl[1]}×vol, "
+          f"hold={max_hold_days}d={max_hold}bars, cusum_h={cusum_h_mult}×vol) …")
+    label_cache = build_label_cache(data, pt_sl, max_hold, vol_span,
+                                    bars_per_day=BARS_PER_DAY,
+                                    cusum_h_mult=cusum_h_mult)
     label_ends = label_end_times(label_cache)
     all_event_dates = pd.DatetimeIndex(sorted({
         t0 for labels in label_cache.values() for t0 in labels.index
@@ -412,7 +443,11 @@ if __name__ == "__main__":
     print(f"Labels: {len(label_cache)} tickers, {len(all_event_dates)} total events")
 
     print("Building feature cache …")
-    feat_cache = build_feature_cache(data, all_event_dates)
+    feat_cache = build_feature_cache(
+        data, all_event_dates,
+        lookback=252 * BARS_PER_DAY,
+        bars_per_day=BARS_PER_DAY,
+    )
     print(f"Features: {len(feat_cache)} date snapshots")
 
     # CPCV or walk-forward
@@ -428,10 +463,14 @@ if __name__ == "__main__":
             label_end_times=label_ends,
         )
     else:
-        print("Running walk-forward (fast mode) …")
+        # hourly data covers <3 years so the default 3-year training window
+        # never opens; use 1 year for short datasets
+        wf_train_years = 1 if MODE == "hourly" else 3
+        print(f"Running walk-forward (fast mode, train_years={wf_train_years}) …")
         splits = [(tr, te, i) for i, (tr, te) in
                   enumerate(walk_forward_splits(
                       all_event_dates,
+                      train_years=wf_train_years,
                       embargo_td=EMBARGO_TD,
                       label_end_times=label_ends,
                   ))]
